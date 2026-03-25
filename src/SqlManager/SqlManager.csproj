@@ -15,7 +15,9 @@
     <VersionPrefix>1.0</VersionPrefix>
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
     <Version Condition="'$(Version)' == ''">$(VersionPrefix).$(BuildNumber)</Version>
-    <FileVersion Condition="'$(FileVersion)' == ''">$([System.Version]::Parse('$(Version)').ToString(4))</FileVersion>
+    <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+$'))">$(Version).0.0</FileVersion>
+    <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+\.\d+$'))">$(Version).0</FileVersion>
+    <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+\.\d+\.\d+$'))">$(Version)</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
   </PropertyGroup>
