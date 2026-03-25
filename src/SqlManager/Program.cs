@@ -46,6 +46,7 @@ internal static class Program
         }
         catch (Exception exception)
         {
+            ErrorLogger.LogException("Fatal application error", exception);
             ui.WriteFatal(exception.Message);
             return 1;
         }
@@ -57,10 +58,12 @@ internal static class Program
         {
             if (eventArgs.ExceptionObject is Exception exception)
             {
+                ErrorLogger.LogException("Unhandled application error", exception);
                 SafeWriteFatal($"Unhandled error: {exception.Message}");
             }
             else
             {
+                ErrorLogger.LogMessage("Unhandled application error", "Unhandled exception object was not an Exception instance.");
                 SafeWriteFatal("Unhandled error occurred.");
             }
         };
@@ -68,6 +71,7 @@ internal static class Program
         TaskScheduler.UnobservedTaskException += (_, eventArgs) =>
         {
             eventArgs.SetObserved();
+            ErrorLogger.LogException("Background task error", eventArgs.Exception.GetBaseException());
             SafeWriteFatal($"Background task error: {eventArgs.Exception.GetBaseException().Message}");
         };
     }

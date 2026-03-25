@@ -1177,6 +1177,9 @@ ORDER BY member.rolname;
             ? throw new UserInputException(errorMessage)
             : value;
 
+    private static void LogHandledException(string context, Exception exception)
+        => ErrorLogger.LogException(context, exception);
+
     private static async Task<OperationResult> ExecuteAsync(Func<Task<OperationResult>> action)
     {
         try
@@ -1189,6 +1192,8 @@ ORDER BY member.rolname;
         }
         catch (SqlException exception)
         {
+            LogHandledException("SQL Server operation failed", exception);
+
             if (exception.Number == -2)
             {
                 return OperationResult.Failure("SQL Server operation timed out.");
@@ -1198,22 +1203,27 @@ ORDER BY member.rolname;
         }
         catch (NpgsqlException exception)
         {
+            LogHandledException("PostgreSQL operation failed", exception);
             return OperationResult.Failure($"PostgreSQL error: {exception.Message}");
         }
         catch (IOException exception)
         {
+            LogHandledException("File operation failed", exception);
             return OperationResult.Failure($"File error: {exception.Message}");
         }
         catch (JsonException exception)
         {
+            LogHandledException("Config parsing failed", exception);
             return OperationResult.Failure($"Config file is invalid JSON: {exception.Message}");
         }
         catch (UnauthorizedAccessException exception)
         {
+            LogHandledException("Access denied during operation", exception);
             return OperationResult.Failure($"Access denied: {exception.Message}");
         }
         catch (TimeoutException exception)
         {
+            LogHandledException("Operation timed out", exception);
             return OperationResult.Failure(exception.Message);
         }
         catch (OperationCanceledException)
@@ -1222,6 +1232,7 @@ ORDER BY member.rolname;
         }
         catch (Exception exception)
         {
+            LogHandledException("Unexpected service error", exception);
             return OperationResult.Failure($"Unexpected error: {exception.Message}");
         }
     }
@@ -1238,6 +1249,8 @@ ORDER BY member.rolname;
         }
         catch (SqlException exception)
         {
+            LogHandledException("SQL Server operation failed", exception);
+
             if (exception.Number == -2)
             {
                 return OperationResult<T>.Failure("SQL Server operation timed out.");
@@ -1247,22 +1260,27 @@ ORDER BY member.rolname;
         }
         catch (NpgsqlException exception)
         {
+            LogHandledException("PostgreSQL operation failed", exception);
             return OperationResult<T>.Failure($"PostgreSQL error: {exception.Message}");
         }
         catch (IOException exception)
         {
+            LogHandledException("File operation failed", exception);
             return OperationResult<T>.Failure($"File error: {exception.Message}");
         }
         catch (JsonException exception)
         {
+            LogHandledException("Config parsing failed", exception);
             return OperationResult<T>.Failure($"Config file is invalid JSON: {exception.Message}");
         }
         catch (UnauthorizedAccessException exception)
         {
+            LogHandledException("Access denied during operation", exception);
             return OperationResult<T>.Failure($"Access denied: {exception.Message}");
         }
         catch (TimeoutException exception)
         {
+            LogHandledException("Operation timed out", exception);
             return OperationResult<T>.Failure(exception.Message);
         }
         catch (OperationCanceledException)
@@ -1271,6 +1289,7 @@ ORDER BY member.rolname;
         }
         catch (Exception exception)
         {
+            LogHandledException("Unexpected service error", exception);
             return OperationResult<T>.Failure($"Unexpected error: {exception.Message}");
         }
     }

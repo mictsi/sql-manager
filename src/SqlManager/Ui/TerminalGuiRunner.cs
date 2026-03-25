@@ -1194,6 +1194,7 @@ internal sealed class TerminalGuiRunner
         }
         catch (Exception exception)
         {
+            ErrorLogger.LogException($"{title} UI action failed", exception);
             MessageBox.ErrorQuery(RequireApp(), title, $"Unexpected error: {exception.Message}", "OK");
         }
     }
