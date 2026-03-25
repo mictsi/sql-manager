@@ -1,6 +1,6 @@
 # SQL Manager
 
-SQL Server management utility with:
+SQL Server and PostgreSQL management utility with:
 
 - the original PowerShell automation script
 - a .NET 10 command-line utility
@@ -9,13 +9,13 @@ SQL Server management utility with:
 ## Files
 
 - `sql-manager.ps1`: Main automation script.
-- `sql-config.json`: Stores multiple servers, selected server, databases, users, roles, and connection strings.
+- `sql-config.json`: Stores multiple servers, provider settings, selected server, databases, users, roles, and connection strings.
 - `src/SqlManager`: .NET 10 implementation that can be published as single-file binaries for Windows, macOS, and Linux.
 
 ## Requirements
 
 - PowerShell 7 only
-- Network access to the SQL Server host
+- Network access to the target SQL Server or PostgreSQL host
 - Permission to install PowerShell modules for the current user
 
 For the .NET utility:
@@ -34,7 +34,7 @@ Install-Module -Name SqlServer
 
 ```json
 {
-  "selectedServerName": "sql01.contoso.local",
+  "selectedServerName": "pg01.contoso.local",
   "timeouts": {
     "connectionTimeoutSeconds": 15,
     "commandTimeoutSeconds": 30
@@ -42,6 +42,8 @@ Install-Module -Name SqlServer
   "servers": [
     {
       "serverName": "sql01.contoso.local",
+      "provider": "sqlserver",
+      "adminDatabase": "master",
       "adminUsername": "sa",
       "adminPassword": "ServerAdminSecret123!",
       "databases": [
@@ -52,7 +54,28 @@ Install-Module -Name SqlServer
               "username": "LabDBUser",
               "password": "stored-password",
               "roles": ["db_owner", "db_datareader"],
-              "connectionString": "Server=..."
+              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=LabDBUser;Password=stored-password;Encrypt=True;TrustServerCertificate=True;"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "serverName": "pg01.contoso.local",
+      "provider": "postgresql",
+      "port": 5432,
+      "adminDatabase": "postgres",
+      "adminUsername": "postgres",
+      "adminPassword": "PostgresAdminSecret123!",
+      "databases": [
+        {
+          "databaseName": "appdb",
+          "users": [
+            {
+              "username": "app_reader",
+              "password": "stored-password",
+              "roles": ["db_datareader"],
+              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_reader;Password=stored-password;Ssl Mode=Require;"
             }
           ]
         }
@@ -61,6 +84,14 @@ Install-Module -Name SqlServer
   ]
 }
 ```
+
+Provider-aware config notes:
+
+- `provider` supports `sqlserver` and `postgresql`.
+- `port` is optional. If omitted, the server provider default is used.
+- `adminDatabase` defaults to `master` for SQL Server and `postgres` for PostgreSQL.
+- The CLI keeps generic role names in config: `db_owner`, `db_datareader`, and `db_datawriter`.
+- SQL syntax is generated per provider at runtime. SQL Server uses native database roles. PostgreSQL uses provider-specific role and grant statements behind the same generic config roles.
 
 ## Examples
 
@@ -107,7 +138,25 @@ dotnet run --project .\src\SqlManager\SqlManager.csproj -- remove-database --ser
 Create a user with generated password and roles:
 
 ```powershell
-dotnet run --project .\src\SqlManager\SqlManager.csproj -- create-user --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles dbowner,db_reader
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- create-user --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles db_owner,db_datareader
+```
+
+Add a PostgreSQL server to the config:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- add-server --server-name pg01.contoso.local --provider postgresql --port 5432 --admin-database postgres --admin-username postgres --admin-password "Secret123!"
+```
+
+Create a PostgreSQL database:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- create-database --server-name pg01.contoso.local --admin-username postgres --admin-password "Secret123!" --database-name appdb
+```
+
+Create a PostgreSQL user with the same generic role syntax:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- create-user --server-name pg01.contoso.local --admin-username postgres --admin-password "Secret123!" --database-name appdb --user-name app_reader --roles db_datareader
 ```
 
 PowerShell-style compatibility is also supported:
@@ -115,6 +164,8 @@ PowerShell-style compatibility is also supported:
 ```powershell
 dotnet run --project .\src\SqlManager\SqlManager.csproj -- --action CreateUser --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles dbowner
 ```
+
+The .NET app is provider-aware. The legacy PowerShell script remains SQL Server-oriented.
 
 Publish a single-file self-contained binary for one runtime:
 

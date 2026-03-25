@@ -274,6 +274,9 @@ internal sealed class SqlManagerApplication
         }
 
         options.ServerName ??= server.ServerName;
+        options.Provider ??= server.Provider;
+        options.Port ??= server.Port;
+        options.AdminDatabase ??= string.IsNullOrWhiteSpace(server.AdminDatabase) ? null : server.AdminDatabase;
         if (string.IsNullOrWhiteSpace(options.AdminUsername))
         {
             options.AdminUsername = server.AdminUsername;
@@ -393,6 +396,23 @@ internal sealed class SqlManagerApplication
                 }
                 case 1:
                 {
+                    var response = PromptProviderWithNavigation(options.Provider);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.Provider = response.Value;
+                    step++;
+                    continue;
+                }
+                case 2:
+                {
                     var response = _ui.PromptTextWithNavigation("Admin username (leave blank to skip):", null, true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
@@ -405,6 +425,41 @@ internal sealed class SqlManagerApplication
                     }
 
                     options.AdminUsername = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
+                    step++;
+                    continue;
+                }
+                case 3:
+                {
+                    var response = PromptPortWithNavigation(null);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.Port = response.Value;
+                    step++;
+                    continue;
+                }
+                case 4:
+                {
+                    var defaultAdminDatabase = options.Provider == SqlProviders.PostgreSql ? SqlProviders.GetDefaultAdminDatabase(options.Provider) : null;
+                    var response = _ui.PromptTextWithNavigation("Admin database (leave blank for provider default):", defaultAdminDatabase, true);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.AdminDatabase = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
                     return options;
                 }
                 default:
@@ -446,6 +501,23 @@ internal sealed class SqlManagerApplication
                 }
                 case 1:
                 {
+                    var response = PromptProviderWithNavigation(existingServer?.Provider);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.Provider = response.Value;
+                    step++;
+                    continue;
+                }
+                case 2:
+                {
                     var response = _ui.PromptTextWithNavigation("Admin username (leave blank to skip):", existingServer?.AdminUsername, true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
@@ -458,6 +530,46 @@ internal sealed class SqlManagerApplication
                     }
 
                     options.AdminUsername = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
+                    step++;
+                    continue;
+                }
+                case 3:
+                {
+                    var response = PromptPortWithNavigation(existingServer?.Port);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.Port = response.Value;
+                    step++;
+                    continue;
+                }
+                case 4:
+                {
+                    var defaultAdminDatabase = existingServer?.AdminDatabase;
+                    if (string.IsNullOrWhiteSpace(defaultAdminDatabase) && options.Provider == SqlProviders.PostgreSql)
+                    {
+                        defaultAdminDatabase = SqlProviders.GetDefaultAdminDatabase(options.Provider);
+                    }
+
+                    var response = _ui.PromptTextWithNavigation("Admin database (leave blank for provider default):", defaultAdminDatabase, true);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.AdminDatabase = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
                     return options;
                 }
                 default:
@@ -1159,6 +1271,48 @@ internal sealed class SqlManagerApplication
         };
     }
 
+    private PromptResponse<string> PromptProviderWithNavigation(string? currentProvider)
+    {
+        var preferredProvider = SqlProviders.Normalize(currentProvider);
+        var choices = preferredProvider == SqlProviders.PostgreSql
+            ? new[] { "PostgreSQL", "SQL Server" }
+            : new[] { "SQL Server", "PostgreSQL" };
+        var response = _ui.PromptSelectionWithNavigation("Provider", choices);
+        return response.Navigation switch
+        {
+            PromptNavigation.Back => PromptResponse<string>.Back(),
+            PromptNavigation.Cancel => PromptResponse<string>.Cancel(),
+            _ => PromptResponse<string>.Submitted(response.Value == "PostgreSQL" ? SqlProviders.PostgreSql : SqlProviders.SqlServer)
+        };
+    }
+
+    private PromptResponse<int?> PromptPortWithNavigation(int? currentPort)
+    {
+        while (true)
+        {
+            var response = _ui.PromptTextWithNavigation("Port (leave blank for provider default):", currentPort?.ToString(), true);
+            switch (response.Navigation)
+            {
+                case PromptNavigation.Back:
+                    return PromptResponse<int?>.Back();
+                case PromptNavigation.Cancel:
+                    return PromptResponse<int?>.Cancel();
+            }
+
+            if (string.IsNullOrWhiteSpace(response.Value))
+            {
+                return PromptResponse<int?>.Submitted(null);
+            }
+
+            if (int.TryParse(response.Value, out var port) && port > 0)
+            {
+                return PromptResponse<int?>.Submitted(port);
+            }
+
+            _ui.WriteWarning("Port must be a positive integer.");
+        }
+    }
+
     private PromptResponse<RemovalScope> PromptRemovalScopeWithNavigation()
     {
         var response = _ui.PromptSelectionWithNavigation("Removal scope", Enum.GetNames<RemovalScope>());
@@ -1223,7 +1377,7 @@ internal sealed class SqlManagerApplication
             ? "* "
             : string.Empty;
         var adminUser = string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername;
-        return $"{activeMarker}{server.ServerName} | admin: {adminUser}";
+        return $"{activeMarker}{server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {adminUser}";
     }
 
     private static RemovalScope ParseScope(string value)

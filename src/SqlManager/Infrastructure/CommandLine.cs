@@ -37,6 +37,9 @@ internal sealed class CommandOptions
     public required CommandKind Command { get; set; }
     public required string ConfigPath { get; set; }
     public string? ServerName { get; set; }
+    public string? Provider { get; set; }
+    public int? Port { get; set; }
+    public string? AdminDatabase { get; set; }
     public string? AdminUsername { get; set; }
     public string? AdminPassword { get; set; }
     public string? DatabaseName { get; set; }
@@ -115,6 +118,8 @@ internal static class CommandLineParser
             var roles = ParseRoles(optionMap);
             var databaseNames = ParseDatabaseNames(optionMap);
             var removalScope = ParseRemovalScope(GetSingleOrDefault(optionMap, "Both", "removalscope"));
+            var provider = ParseProvider(GetSingleOrDefault(optionMap, null, "provider", "serverprovider"));
+            var port = ParseNullableInt(GetSingleOrDefault(optionMap, null, "port"), "Port must be a positive integer.");
             var parsed = new ParsedArguments
             {
                 Command = command.Value,
@@ -123,6 +128,9 @@ internal static class CommandLineParser
                     Command = command.Value,
                     ConfigPath = configPath,
                     ServerName = GetSingleOrDefault(optionMap, null, "servername", "server"),
+                    Provider = provider,
+                    Port = port,
+                    AdminDatabase = GetSingleOrDefault(optionMap, null, "admindatabase", "maintenanceDatabase", "maintenanceDb"),
                     AdminUsername = GetSingleOrDefault(optionMap, null, "adminusername", "adminuser", "sqladmin"),
                     AdminPassword = GetSingleOrDefault(optionMap, null, "adminpassword"),
                     DatabaseName = databaseNames.Count > 0 ? databaseNames[^1] : null,
@@ -288,5 +296,23 @@ internal static class CommandLineParser
             "both" => RemovalScope.Both,
             _ => throw new InvalidOperationException("RemovalScope must be Database, Server, or Both.")
         };
+    }
+
+    private static string? ParseProvider(string? rawProvider)
+        => string.IsNullOrWhiteSpace(rawProvider) ? null : SqlProviders.Normalize(rawProvider);
+
+    private static int? ParseNullableInt(string? rawValue, string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(rawValue, out var value) || value <= 0)
+        {
+            throw new InvalidOperationException(errorMessage);
+        }
+
+        return value;
     }
 }

@@ -32,7 +32,8 @@ internal static class Program
             new SqlManagerService(
                 new ConfigStore(),
                 new PasswordGenerator(),
-                new SqlServerGateway()));
+                new SqlServerGateway(),
+                new PostgreSqlGateway()));
 
         try
         {

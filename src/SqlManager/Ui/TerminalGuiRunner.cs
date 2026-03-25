@@ -1304,7 +1304,7 @@ internal sealed class TerminalGuiRunner
     {
         var passwordState = string.IsNullOrWhiteSpace(server.AdminPassword) ? "missing" : "saved";
         var userCount = server.Databases.Sum(database => database.Users.Count);
-        return $"{server.ServerName} | admin: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)} | password: {passwordState} | dbs: {server.Databases.Count} | users: {userCount}";
+        return $"{server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)} | password: {passwordState} | dbs: {server.Databases.Count} | users: {userCount}";
     }
 
     private static ListView CreateListView(IReadOnlyList<string> items, int selectedIndex)

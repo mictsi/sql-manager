@@ -4,7 +4,11 @@ VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{827E0CD3-B72D-47B6-A68D-7590B98EB39B}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{EB4D751C-2653-43A2-9F3D-BEF2F7851977}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlManager", "src\SqlManager\SqlManager.csproj", "{C1DDCA83-9303-7000-405C-00BCF7815BAF}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SqlManager.Tests", "tests\SqlManager.Tests\SqlManager.Tests.csproj", "{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -16,12 +20,17 @@ Global
 		{C1DDCA83-9303-7000-405C-00BCF7815BAF}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{C1DDCA83-9303-7000-405C-00BCF7815BAF}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{C1DDCA83-9303-7000-405C-00BCF7815BAF}.Release|Any CPU.Build.0 = Release|Any CPU
+		{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{C1DDCA83-9303-7000-405C-00BCF7815BAF} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{31E5B522-8C8B-49D4-9D2D-0A2EA2CD6F88} = {EB4D751C-2653-43A2-9F3D-BEF2F7851977}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {0302B84A-764A-4442-8C22-A0E8F65D807B}

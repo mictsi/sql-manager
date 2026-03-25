@@ -1,25 +1,50 @@
 {
-  "selectedServerName": "",
+  "selectedServerName": "sql01.contoso.local",
   "timeouts": {
     "connectionTimeoutSeconds": 15,
     "commandTimeoutSeconds": 30
   },
   "servers": [
     {
-      "serverName": "",
+      "serverName": "sql01.contoso.local",
+      "provider": "sqlserver",
+      "adminDatabase": "master",
       "adminUsername": "sa",
-      "adminPassword": "",
+      "adminPassword": "ServerAdminSecret123!",
       "databases": [
         {
-          "databaseName": "",
+          "databaseName": "LabDB",
           "users": [
             {
-              "username": "",
-              "password": "",
+              "username": "lab_reader",
+              "password": "reader-password",
               "roles": [
-                "db_owner"
+                "db_datareader"
               ],
-              "connectionString": ""
+              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=reader-password;Encrypt=True;TrustServerCertificate=True;"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "serverName": "pg01.contoso.local",
+      "provider": "postgresql",
+      "port": 5432,
+      "adminDatabase": "postgres",
+      "adminUsername": "postgres",
+      "adminPassword": "PostgresAdminSecret123!",
+      "databases": [
+        {
+          "databaseName": "appdb",
+          "users": [
+            {
+              "username": "app_writer",
+              "password": "writer-password",
+              "roles": [
+                "db_datawriter"
+              ],
+              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_writer;Password=writer-password;Ssl Mode=Require;"
             }
           ]
         }

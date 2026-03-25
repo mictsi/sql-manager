@@ -1,6 +1,8 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SqlManager;
 
@@ -10,12 +12,14 @@ internal sealed class SqlManagerService
     private readonly ConfigStore _configStore;
     private readonly PasswordGenerator _passwordGenerator;
     private readonly SqlServerGateway _sqlServerGateway;
+    private readonly PostgreSqlGateway _postgreSqlGateway;
 
-    public SqlManagerService(ConfigStore configStore, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway)
+    public SqlManagerService(ConfigStore configStore, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway, PostgreSqlGateway postgreSqlGateway)
     {
         _configStore = configStore;
         _passwordGenerator = passwordGenerator;
         _sqlServerGateway = sqlServerGateway;
+        _postgreSqlGateway = postgreSqlGateway;
     }
 
     public Task<OperationResult<SqlManagerConfig>> LoadConfigSummaryAsync(string configPath, CancellationToken cancellationToken)
@@ -31,7 +35,7 @@ internal sealed class SqlManagerService
             var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
             if (!string.IsNullOrWhiteSpace(options.ServerName))
             {
-                var server = GetOrCreateServer(config, options.ServerName!, options.AdminUsername, options.AdminPassword);
+                var server = GetOrCreateServer(config, options.ServerName!, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
                 server.AdminUsername = options.AdminUsername ?? server.AdminUsername;
                 server.AdminPassword = options.AdminPassword ?? server.AdminPassword;
                 config.SelectedServerName = options.ServerName!;
@@ -46,7 +50,7 @@ internal sealed class SqlManagerService
         {
             var serverName = Require(options.ServerName, "AddServer requires ServerName.");
             var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
-            GetOrCreateServer(config, serverName, options.AdminUsername, options.AdminPassword);
+            GetOrCreateServer(config, serverName, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
             if (string.IsNullOrWhiteSpace(config.SelectedServerName))
             {
                 config.SelectedServerName = serverName;
@@ -76,14 +80,7 @@ internal sealed class SqlManagerService
         {
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "SyncServer requires AdminPassword.");
-            var databaseNames = await _sqlServerGateway.QueryNamesAsync(
-                context.ServerName,
-                context.AdminUsername,
-                adminPassword,
-                "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name;",
-                "master",
-                context.Timeouts,
-                cancellationToken);
+            var databaseNames = await LoadServerDatabaseNamesAsync(context, adminPassword, cancellationToken);
 
             var synchronizedDatabases = new List<DatabaseConfig>();
             var userCount = 0;
@@ -92,7 +89,7 @@ internal sealed class SqlManagerService
             {
                 var existingDatabase = context.ServerConfig?.Databases.FirstOrDefault(database => database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase));
                 var databaseConfig = new DatabaseConfig { DatabaseName = databaseName };
-                var userRows = await _sqlServerGateway.QueryDatabaseUsersAsync(context.ServerName, context.AdminUsername, adminPassword, databaseName, context.Timeouts, cancellationToken);
+                var userRows = await QueryDatabaseUsersAsync(context, adminPassword, databaseName, cancellationToken);
 
                 foreach (var userRow in userRows)
                 {
@@ -103,7 +100,7 @@ internal sealed class SqlManagerService
                         Username = userRow.UserName,
                         Password = password,
                         Roles = SplitRoleList(userRow.Roles),
-                        ConnectionString = BuildConnectionString(context.ServerName, databaseName, userRow.UserName, password)
+                        ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userRow.UserName, password)
                     });
                     userCount++;
                 }
@@ -111,7 +108,7 @@ internal sealed class SqlManagerService
                 synchronizedDatabases.Add(databaseConfig);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             serverConfig.Databases = synchronizedDatabases;
             serverConfig.AdminUsername = context.AdminUsername;
             serverConfig.AdminPassword = context.AdminPassword;
@@ -140,17 +137,39 @@ internal sealed class SqlManagerService
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "CreateDatabase requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "CreateDatabase requires DatabaseName.");
-            var quotedDatabase = QuoteIdentifier(databaseName);
-            var query = $"""
-IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = {QuoteLiteral(databaseName)})
+            if (IsSqlServer(context.Provider))
+            {
+                var quotedDatabase = QuoteSqlServerIdentifier(databaseName);
+                var query = $"""
+IF NOT EXISTS (SELECT 1 FROM sys.databases WHERE name = {QuoteSqlLiteral(databaseName)})
 BEGIN
     EXEC('CREATE DATABASE {quotedDatabase}');
 END
 """;
 
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, query, "master", context.Timeouts, cancellationToken);
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
+            else
+            {
+                var databaseExists = await ExecuteScalarIntAsync(
+                    context,
+                    adminPassword,
+                    $"SELECT COUNT(1) FROM pg_database WHERE datname = {QuotePostgreSqlLiteral(databaseName)};",
+                    context.AdminDatabase,
+                    cancellationToken) > 0;
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+                if (!databaseExists)
+                {
+                    await ExecuteNonQueryAsync(
+                        context,
+                        adminPassword,
+                        $"CREATE DATABASE {QuotePostgreSqlIdentifier(databaseName)};",
+                        context.AdminDatabase,
+                        cancellationToken);
+                }
+            }
+
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             GetOrCreateDatabase(serverConfig, databaseName);
             context.Config.SelectedServerName = context.ServerName;
             await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
@@ -164,13 +183,14 @@ END
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "RemoveDatabase requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "RemoveDatabase requires DatabaseName.");
-            var databaseExists = await _sqlServerGateway.ExecuteScalarIntAsync(
-                context.ServerName,
-                context.AdminUsername,
+            var databaseExistsQuery = IsSqlServer(context.Provider)
+                ? $"SELECT COUNT(1) FROM sys.databases WHERE name = {QuoteSqlLiteral(databaseName)};"
+                : $"SELECT COUNT(1) FROM pg_database WHERE datname = {QuotePostgreSqlLiteral(databaseName)};";
+            var databaseExists = await ExecuteScalarIntAsync(
+                context,
                 adminPassword,
-                $"SELECT COUNT(1) FROM sys.databases WHERE name = {QuoteLiteral(databaseName)};",
-                "master",
-                context.Timeouts,
+                databaseExistsQuery,
+                context.AdminDatabase,
                 cancellationToken) > 0;
 
             if (!databaseExists)
@@ -178,11 +198,20 @@ END
                 throw new UserInputException($"Database '{databaseName}' does not exist on '{context.ServerName}'.");
             }
 
-            var quotedDatabase = QuoteIdentifier(databaseName);
-            var query = $"ALTER DATABASE {quotedDatabase} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {quotedDatabase};";
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, query, "master", context.Timeouts, cancellationToken);
+            if (IsSqlServer(context.Provider))
+            {
+                var quotedDatabase = QuoteSqlServerIdentifier(databaseName);
+                var query = $"ALTER DATABASE {quotedDatabase} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {quotedDatabase};";
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
+            else
+            {
+                var quotedDatabase = QuotePostgreSqlIdentifier(databaseName);
+                var query = $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = {QuotePostgreSqlLiteral(databaseName)} AND pid <> pg_backend_pid(); DROP DATABASE {quotedDatabase};";
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             serverConfig.Databases = serverConfig.Databases
                 .Where(database => !database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -199,62 +228,33 @@ END
             var adminPassword = Require(context.AdminPassword, "CreateUser requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "CreateUser requires DatabaseName.");
             var userName = Require(options.UserName, "CreateUser requires UserName.");
-            var roles = NormalizeRoles(options.Roles);
+            var roles = NormalizeRoles(options.Roles, context.Provider);
             if (roles.Count == 0)
             {
                 throw new UserInputException("CreateUser requires Roles.");
             }
 
-            var loginExists = await _sqlServerGateway.ExecuteScalarIntAsync(
-                context.ServerName,
-                context.AdminUsername,
+            var loginExistsQuery = IsSqlServer(context.Provider)
+                ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
+                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+            var loginExists = await ExecuteScalarIntAsync(
+                context,
                 adminPassword,
-                $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteLiteral(userName)};",
-                "master",
-                context.Timeouts,
+                loginExistsQuery,
+                context.AdminDatabase,
                 cancellationToken) > 0;
 
             var resolvedPassword = ResolveRequestedPassword(options.NewUserPassword, loginExists, context.ServerConfig, userName);
-            var quotedUser = QuoteIdentifier(userName);
-            var quotedDatabase = QuoteIdentifier(databaseName);
+            await EnsureServerLoginAsync(context, adminPassword, databaseName, userName, resolvedPassword.Password, loginExists, !string.IsNullOrWhiteSpace(options.NewUserPassword), cancellationToken);
+            var membershipQuery = BuildRoleMembershipSyncQuery(context, databaseName, userName, roles, failIfUserMissing: false);
+            await ExecuteNonQueryAsync(context, adminPassword, membershipQuery, databaseName, cancellationToken);
 
-            if (!loginExists)
-            {
-                var createLogin = $"CREATE LOGIN {quotedUser} WITH PASSWORD = {QuoteLiteral(resolvedPassword.Password)}, CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = {quotedDatabase}";
-                var query = $"EXEC({QuoteLiteral(createLogin)}); ALTER LOGIN {quotedUser} ENABLE;";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, query, "master", context.Timeouts, cancellationToken);
-            }
-            else if (!string.IsNullOrWhiteSpace(options.NewUserPassword))
-            {
-                var alterLogin = $"ALTER LOGIN {quotedUser} WITH PASSWORD = {QuoteLiteral(resolvedPassword.Password)}";
-                var query = $"EXEC({QuoteLiteral(alterLogin)}); ALTER LOGIN {quotedUser} ENABLE;";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, query, "master", context.Timeouts, cancellationToken);
-            }
-
-            var queryBuilder = new StringBuilder();
-            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)})");
-            queryBuilder.AppendLine("BEGIN");
-            queryBuilder.AppendLine($"    CREATE USER {quotedUser} FOR LOGIN {quotedUser};");
-            queryBuilder.AppendLine("END");
-            foreach (var role in roles)
-            {
-                queryBuilder.AppendLine($"IF NOT EXISTS (");
-                queryBuilder.AppendLine("    SELECT 1");
-                queryBuilder.AppendLine("    FROM sys.database_role_members drm");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
-                queryBuilder.AppendLine($"    WHERE rp.name = {QuoteLiteral(role)} AND mp.name = {QuoteLiteral(userName)})");
-                queryBuilder.AppendLine($"    ALTER ROLE {QuoteIdentifier(role)} ADD MEMBER {quotedUser};");
-            }
-
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, queryBuilder.ToString(), databaseName, context.Timeouts, cancellationToken);
-
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Password = resolvedPassword.Password;
             userConfig.Roles = roles.ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.ServerName, databaseName, userName, resolvedPassword.Password);
+            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, resolvedPassword.Password);
             context.Config.SelectedServerName = context.ServerName;
             await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
 
@@ -270,22 +270,23 @@ END
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "SetUserAccess requires AdminPassword.");
             var userName = Require(options.UserName, "SetUserAccess requires UserName.");
-            var assignments = NormalizeDatabaseRoleAssignments(options.DatabaseRoleAssignments);
+            var assignments = NormalizeDatabaseRoleAssignments(options.DatabaseRoleAssignments, context.Provider);
             if (assignments.Count == 0)
             {
                 throw new UserInputException("SetUserAccess requires at least one database role selection.");
             }
 
-            var loginExists = await _sqlServerGateway.ExecuteScalarIntAsync(
-                context.ServerName,
-                context.AdminUsername,
+            var loginExistsQuery = IsSqlServer(context.Provider)
+                ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
+                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+            var loginExists = await ExecuteScalarIntAsync(
+                context,
                 adminPassword,
-                $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteLiteral(userName)};",
-                "master",
-                context.Timeouts,
+                loginExistsQuery,
+                context.AdminDatabase,
                 cancellationToken) > 0;
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var knownPassword = GetStoredPasswordForUser(serverConfig, userName);
             var passwordForConfig = knownPassword;
             string passwordMessage;
@@ -305,21 +306,14 @@ END
                     ? "Password was generated automatically."
                     : "Password was set from the supplied NewUserPassword value.";
 
-                var quotedUser = QuoteIdentifier(userName);
-                var quotedDatabase = QuoteIdentifier(firstAssignedDatabase);
-                var createLogin = $"CREATE LOGIN {quotedUser} WITH PASSWORD = {QuoteLiteral(passwordForConfig)}, CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = {quotedDatabase}";
-                var createLoginQuery = $"EXEC({QuoteLiteral(createLogin)}); ALTER LOGIN {quotedUser} ENABLE;";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, createLoginQuery, "master", context.Timeouts, cancellationToken);
+                await EnsureServerLoginAsync(context, adminPassword, firstAssignedDatabase, userName, passwordForConfig, false, false, cancellationToken);
             }
             else if (!string.IsNullOrWhiteSpace(options.NewUserPassword))
             {
                 passwordForConfig = options.NewUserPassword!;
                 passwordMessage = "Password was set from the supplied NewUserPassword value.";
 
-                var quotedUser = QuoteIdentifier(userName);
-                var alterLogin = $"ALTER LOGIN {quotedUser} WITH PASSWORD = {QuoteLiteral(passwordForConfig)}";
-                var alterLoginQuery = $"EXEC({QuoteLiteral(alterLogin)}); ALTER LOGIN {quotedUser} ENABLE;";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, alterLoginQuery, "master", context.Timeouts, cancellationToken);
+                await EnsureServerLoginAsync(context, adminPassword, assignments[0].DatabaseName, userName, passwordForConfig, true, true, cancellationToken);
             }
             else if (!string.IsNullOrWhiteSpace(knownPassword))
             {
@@ -334,20 +328,20 @@ END
             {
                 if (assignment.Roles.Count == 0)
                 {
-                    var dropUserQuery = $"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)}) DROP USER {QuoteIdentifier(userName)};";
-                    await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, dropUserQuery, assignment.DatabaseName, context.Timeouts, cancellationToken);
+                    var dropUserQuery = BuildRemoveDatabaseUserQuery(context, assignment.DatabaseName, userName);
+                    await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, assignment.DatabaseName, cancellationToken);
                     RemoveUserFromConfigDatabases(serverConfig, userName, [assignment.DatabaseName]);
                     continue;
                 }
 
-                var syncQuery = BuildRoleMembershipSyncQuery(userName, assignment.Roles, failIfUserMissing: false);
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, syncQuery, assignment.DatabaseName, context.Timeouts, cancellationToken);
+                var syncQuery = BuildRoleMembershipSyncQuery(context, assignment.DatabaseName, userName, assignment.Roles, failIfUserMissing: false);
+                await ExecuteNonQueryAsync(context, adminPassword, syncQuery, assignment.DatabaseName, cancellationToken);
 
                 var databaseConfig = GetOrCreateDatabase(serverConfig, assignment.DatabaseName);
                 var userConfig = GetOrCreateUser(databaseConfig, userName);
                 userConfig.Password = passwordForConfig;
                 userConfig.Roles = assignment.Roles.ToList();
-                userConfig.ConnectionString = BuildConnectionString(context.ServerName, assignment.DatabaseName, userName, passwordForConfig);
+                userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, assignment.DatabaseName, userName, passwordForConfig);
             }
 
             context.Config.SelectedServerName = context.ServerName;
@@ -370,34 +364,20 @@ END
             var adminPassword = Require(context.AdminPassword, "AddRole requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "AddRole requires DatabaseName.");
             var userName = Require(options.UserName, "AddRole requires UserName.");
-            var roles = NormalizeRoles(options.Roles);
+            var roles = NormalizeRoles(options.Roles, context.Provider);
             if (roles.Count == 0)
             {
                 throw new UserInputException("AddRole requires Roles.");
             }
 
-            var queryBuilder = new StringBuilder();
-            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)})");
-            queryBuilder.AppendLine("    THROW 50000, 'Database user does not exist.', 1;");
+            var query = BuildAddRolesQuery(context, databaseName, userName, roles);
+            await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
 
-            foreach (var role in roles)
-            {
-                queryBuilder.AppendLine($"IF NOT EXISTS (");
-                queryBuilder.AppendLine("    SELECT 1");
-                queryBuilder.AppendLine("    FROM sys.database_role_members drm");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
-                queryBuilder.AppendLine($"    WHERE rp.name = {QuoteLiteral(role)} AND mp.name = {QuoteLiteral(userName)})");
-                queryBuilder.AppendLine($"    ALTER ROLE {QuoteIdentifier(role)} ADD MEMBER {QuoteIdentifier(userName)};");
-            }
-
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, queryBuilder.ToString(), databaseName, context.Timeouts, cancellationToken);
-
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Concat(roles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.ServerName, databaseName, userName, userConfig.Password);
+            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
             context.Config.SelectedServerName = context.ServerName;
             await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
 
@@ -411,34 +391,20 @@ END
             var adminPassword = Require(context.AdminPassword, "RemoveRole requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "RemoveRole requires DatabaseName.");
             var userName = Require(options.UserName, "RemoveRole requires UserName.");
-            var roles = NormalizeRoles(options.Roles);
+            var roles = NormalizeRoles(options.Roles, context.Provider);
             if (roles.Count == 0)
             {
                 throw new UserInputException("RemoveRole requires Roles.");
             }
 
-            var queryBuilder = new StringBuilder();
-            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)})");
-            queryBuilder.AppendLine("    THROW 50000, 'Database user does not exist.', 1;");
+            var query = BuildRemoveRolesQuery(context, databaseName, userName, roles);
+            await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
 
-            foreach (var role in roles)
-            {
-                queryBuilder.AppendLine("IF EXISTS (");
-                queryBuilder.AppendLine("    SELECT 1");
-                queryBuilder.AppendLine("    FROM sys.database_role_members drm");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
-                queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
-                queryBuilder.AppendLine($"    WHERE rp.name = {QuoteLiteral(role)} AND mp.name = {QuoteLiteral(userName)})");
-                queryBuilder.AppendLine($"    ALTER ROLE {QuoteIdentifier(role)} DROP MEMBER {QuoteIdentifier(userName)};");
-            }
-
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, queryBuilder.ToString(), databaseName, context.Timeouts, cancellationToken);
-
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Except(roles, StringComparer.OrdinalIgnoreCase).ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.ServerName, databaseName, userName, userConfig.Password);
+            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
             context.Config.SelectedServerName = context.ServerName;
             await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
 
@@ -451,7 +417,7 @@ END
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "ShowUsers requires AdminPassword.");
             var databaseName = Require(options.DatabaseName, "ShowUsers requires DatabaseName.");
-            var rows = await _sqlServerGateway.QueryDatabaseUsersAsync(context.ServerName, context.AdminUsername, adminPassword, databaseName, context.Timeouts, cancellationToken);
+            var rows = await QueryDatabaseUsersAsync(context, adminPassword, databaseName, cancellationToken);
             var message = rows.Count == 0
                 ? $"No matching users were found in database '{databaseName}'."
                 : $"Retrieved {rows.Count} user(s) from '{databaseName}'.";
@@ -472,11 +438,11 @@ END
 
             foreach (var databaseName in selectedDatabases)
             {
-                var dropUserQuery = $"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)}) DROP USER {QuoteIdentifier(userName)};";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, dropUserQuery, databaseName, context.Timeouts, cancellationToken);
+                var dropUserQuery = BuildRemoveDatabaseUserQuery(context, databaseName, userName);
+                await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, databaseName, cancellationToken);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             if (selectedDatabases.Count > 0)
             {
                 RemoveUserFromConfigDatabases(serverConfig, userName, selectedDatabases);
@@ -484,8 +450,8 @@ END
 
             if (removeServerLogin)
             {
-                var dropLoginQuery = $"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = {QuoteLiteral(userName)}) DROP LOGIN {QuoteIdentifier(userName)};";
-                await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.AdminUsername, adminPassword, dropLoginQuery, "master", context.Timeouts, cancellationToken);
+                var dropLoginQuery = BuildDropLoginQuery(context, userName);
+                await ExecuteNonQueryAsync(context, adminPassword, dropLoginQuery, context.AdminDatabase, cancellationToken);
             }
 
             context.Config.SelectedServerName = context.ServerName;
@@ -503,34 +469,28 @@ END
             var context = await ResolveServerContextAsync(options, true, cancellationToken);
             var adminPassword = Require(context.AdminPassword, "UpdatePassword requires AdminPassword.");
             var userName = Require(options.UserName, "UpdatePassword requires UserName.");
-            var loginExists = await _sqlServerGateway.ExecuteScalarIntAsync(
-                context.ServerName,
-                context.AdminUsername,
+            var loginExistsQuery = IsSqlServer(context.Provider)
+                ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
+                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+            var loginExists = await ExecuteScalarIntAsync(
+                context,
                 adminPassword,
-                $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteLiteral(userName)};",
-                "master",
-                context.Timeouts,
+                loginExistsQuery,
+                context.AdminDatabase,
                 cancellationToken);
 
             if (loginExists == 0)
             {
-                throw new UserInputException($"Login '{userName}' does not exist on '{context.ServerName}'.");
+                var subject = IsSqlServer(context.Provider) ? "Login" : "Role";
+                throw new UserInputException($"{subject} '{userName}' does not exist on '{context.ServerName}'.");
             }
 
             var newPassword = string.IsNullOrWhiteSpace(options.NewUserPassword)
                 ? _passwordGenerator.Generate()
                 : options.NewUserPassword!;
-            var alterLoginStatement = $"ALTER LOGIN {QuoteIdentifier(userName)} WITH PASSWORD = {QuoteLiteral(newPassword)}";
-            await _sqlServerGateway.ExecuteNonQueryAsync(
-                context.ServerName,
-                context.AdminUsername,
-                adminPassword,
-                $"EXEC({QuoteLiteral(alterLoginStatement)});",
-                "master",
-                context.Timeouts,
-                cancellationToken);
+            await EnsureServerLoginAsync(context, adminPassword, context.AdminDatabase, userName, newPassword, true, true, cancellationToken);
 
-            UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerName, context.AdminUsername, context.AdminPassword), context.ServerName, userName, newPassword);
+            UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), context.Provider, context.ServerName, context.Port, userName, newPassword);
             context.Config.SelectedServerName = context.ServerName;
             await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
 
@@ -556,6 +516,15 @@ END
         }
 
         var serverConfig = FindServer(config, serverName);
+        var provider = SqlProviders.Normalize(options.Provider ?? serverConfig?.Provider);
+        var port = options.Port ?? serverConfig?.Port;
+        var adminDatabase = string.IsNullOrWhiteSpace(options.AdminDatabase)
+            ? serverConfig?.AdminDatabase
+            : options.AdminDatabase;
+        adminDatabase = string.IsNullOrWhiteSpace(adminDatabase)
+            ? SqlProviders.GetDefaultAdminDatabase(provider)
+            : adminDatabase;
+
         var adminUsername = string.IsNullOrWhiteSpace(options.AdminUsername)
             ? serverConfig?.AdminUsername
             : options.AdminUsername;
@@ -570,20 +539,26 @@ END
         if (persistSelection)
         {
             config.SelectedServerName = serverName;
-            if (serverConfig is not null && !string.IsNullOrWhiteSpace(options.AdminUsername))
+            if (serverConfig is not null)
             {
-                serverConfig.AdminUsername = options.AdminUsername!;
-            }
+                serverConfig.Provider = provider;
+                serverConfig.Port = port;
+                serverConfig.AdminDatabase = adminDatabase;
+                if (!string.IsNullOrWhiteSpace(options.AdminUsername))
+                {
+                    serverConfig.AdminUsername = options.AdminUsername!;
+                }
 
-            if (serverConfig is not null && !string.IsNullOrWhiteSpace(options.AdminPassword))
-            {
-                serverConfig.AdminPassword = options.AdminPassword!;
+                if (!string.IsNullOrWhiteSpace(options.AdminPassword))
+                {
+                    serverConfig.AdminPassword = options.AdminPassword!;
+                }
             }
 
             await _configStore.SaveAsync(options.ConfigPath, config, cancellationToken);
         }
 
-        return new ResolvedServerContext(config, serverConfig, serverName, adminUsername, adminPassword ?? string.Empty, config.Timeouts);
+        return new ResolvedServerContext(config, serverConfig, serverName, provider, port, adminDatabase!, adminUsername, adminPassword ?? string.Empty, config.Timeouts);
     }
 
     private static string SelectConfiguredServerName(SqlManagerConfig config)
@@ -606,22 +581,36 @@ END
     private static ServerConfig? FindServer(SqlManagerConfig config, string serverName)
         => config.Servers.FirstOrDefault(server => server.ServerName.Equals(serverName, StringComparison.OrdinalIgnoreCase));
 
-    private static ServerConfig GetOrCreateServer(SqlManagerConfig config, string serverName, string? adminUsername, string? adminPassword)
+    private static ServerConfig GetOrCreateServer(SqlManagerConfig config, string serverName, string? provider, int? port, string? adminDatabase, string? adminUsername, string? adminPassword)
     {
+        var normalizedProvider = SqlProviders.Normalize(provider);
+        var normalizedAdminDatabase = string.IsNullOrWhiteSpace(adminDatabase)
+            ? SqlProviders.GetDefaultAdminDatabase(normalizedProvider)
+            : adminDatabase!;
+
         var server = FindServer(config, serverName);
         if (server is null)
         {
             server = new ServerConfig
             {
                 ServerName = serverName,
+                Provider = normalizedProvider,
+                Port = port,
+                AdminDatabase = normalizedAdminDatabase,
                 AdminUsername = adminUsername ?? string.Empty,
                 AdminPassword = adminPassword ?? string.Empty
             };
             config.Servers.Add(server);
         }
-        else if (!string.IsNullOrWhiteSpace(adminUsername))
+        else
         {
-            server.AdminUsername = adminUsername!;
+            server.Provider = normalizedProvider;
+            server.Port = port;
+            server.AdminDatabase = normalizedAdminDatabase;
+            if (!string.IsNullOrWhiteSpace(adminUsername))
+            {
+                server.AdminUsername = adminUsername!;
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(adminPassword))
@@ -697,14 +686,14 @@ END
         }
     }
 
-    private static void UpdateUserPasswordInConfig(ServerConfig server, string serverName, string userName, string password)
+    private static void UpdateUserPasswordInConfig(ServerConfig server, string provider, string serverName, int? port, string userName, string password)
     {
         foreach (var database in server.Databases)
         {
             foreach (var user in database.Users.Where(user => user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)))
             {
                 user.Password = password;
-                user.ConnectionString = BuildConnectionString(serverName, database.DatabaseName, userName, password);
+                user.ConnectionString = BuildConnectionString(provider, serverName, port, database.DatabaseName, userName, password);
             }
         }
     }
@@ -730,15 +719,109 @@ END
         return new ResolvedPassword(_passwordGenerator.Generate(), "Password was generated automatically.");
     }
 
+    private async Task ExecuteNonQueryAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+            return;
+        }
+
+        await _postgreSqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+    }
+
+    private async Task<int> ExecuteScalarIntAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            return await _sqlServerGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+        }
+
+        return await _postgreSqlGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+    }
+
     private async Task<IReadOnlyList<string>> LoadServerDatabaseNamesAsync(ResolvedServerContext context, string adminPassword, CancellationToken cancellationToken)
-        => await _sqlServerGateway.QueryNamesAsync(
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            return await _sqlServerGateway.QueryNamesAsync(
+                context.ServerName,
+                context.Port,
+                context.AdminUsername,
+                adminPassword,
+                "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name;",
+                context.AdminDatabase,
+                context.Timeouts,
+                cancellationToken);
+        }
+
+        return await _postgreSqlGateway.QueryNamesAsync(
             context.ServerName,
+            context.Port,
             context.AdminUsername,
             adminPassword,
-            "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name;",
-            "master",
+            "SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn = true AND datname NOT IN ('postgres') ORDER BY datname;",
+            context.AdminDatabase,
             context.Timeouts,
             cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(ResolvedServerContext context, string adminPassword, string databaseName, CancellationToken cancellationToken)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            return await _sqlServerGateway.QueryDatabaseUsersAsync(
+                context.ServerName,
+                context.Port,
+                context.AdminUsername,
+                adminPassword,
+                databaseName,
+                context.Timeouts,
+                cancellationToken);
+        }
+
+        return await _postgreSqlGateway.QueryDatabaseUsersAsync(
+            context.ServerName,
+            context.Port,
+            context.AdminUsername,
+            adminPassword,
+            databaseName,
+            BuildPostgreSqlShowUsersQuery(databaseName),
+            context.Timeouts,
+            cancellationToken);
+    }
+
+    private async Task EnsureServerLoginAsync(ResolvedServerContext context, string adminPassword, string defaultDatabase, string userName, string password, bool loginExists, bool updatePassword, CancellationToken cancellationToken)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            var quotedUser = QuoteSqlServerIdentifier(userName);
+            var quotedDatabase = QuoteSqlServerIdentifier(defaultDatabase);
+            if (!loginExists)
+            {
+                var createLogin = $"CREATE LOGIN {quotedUser} WITH PASSWORD = {QuoteSqlLiteral(password)}, CHECK_POLICY = ON, CHECK_EXPIRATION = OFF, DEFAULT_DATABASE = {quotedDatabase}";
+                await ExecuteNonQueryAsync(context, adminPassword, $"EXEC({QuoteSqlLiteral(createLogin)}); ALTER LOGIN {quotedUser} ENABLE;", context.AdminDatabase, cancellationToken);
+            }
+            else if (updatePassword)
+            {
+                var alterLogin = $"ALTER LOGIN {quotedUser} WITH PASSWORD = {QuoteSqlLiteral(password)}";
+                await ExecuteNonQueryAsync(context, adminPassword, $"EXEC({QuoteSqlLiteral(alterLogin)}); ALTER LOGIN {quotedUser} ENABLE;", context.AdminDatabase, cancellationToken);
+            }
+
+            return;
+        }
+
+        if (!loginExists)
+        {
+            var query = $"CREATE ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+            await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+        }
+        else if (updatePassword)
+        {
+            var query = $"ALTER ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+            await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+        }
+    }
 
     private static List<string> GetRequestedDatabaseNames(CommandOptions options, bool requireOne, string errorMessage)
     {
@@ -761,7 +844,7 @@ END
         return normalized;
     }
 
-    private static List<DatabaseRoleAssignment> NormalizeDatabaseRoleAssignments(IReadOnlyList<DatabaseRoleAssignment> assignments)
+    private static List<DatabaseRoleAssignment> NormalizeDatabaseRoleAssignments(IReadOnlyList<DatabaseRoleAssignment> assignments, string provider)
     {
         var normalized = new List<DatabaseRoleAssignment>();
         foreach (var assignment in assignments)
@@ -769,25 +852,30 @@ END
             var databaseName = Require(assignment.DatabaseName, "Database role assignments require DatabaseName.");
             var roles = assignment.Roles.Count == 0
                 ? []
-                : NormalizeRoles(assignment.Roles);
+                : NormalizeRoles(assignment.Roles, provider);
             normalized.Add(new DatabaseRoleAssignment(databaseName, roles));
         }
 
         return normalized;
     }
 
-    private static string BuildRoleMembershipSyncQuery(string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
+    private static string BuildRoleMembershipSyncQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
+        => IsSqlServer(context.Provider)
+            ? BuildSqlServerRoleMembershipSyncQuery(userName, desiredRoles, failIfUserMissing)
+            : BuildPostgreSqlRoleMembershipSyncQuery(databaseName, userName, desiredRoles, failIfUserMissing);
+
+    private static string BuildSqlServerRoleMembershipSyncQuery(string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
     {
-        var quotedUser = QuoteIdentifier(userName);
+        var quotedUser = QuoteSqlServerIdentifier(userName);
         var queryBuilder = new StringBuilder();
         if (failIfUserMissing)
         {
-            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)})");
+            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)})");
             queryBuilder.AppendLine("    THROW 50000, 'Database user does not exist.', 1;");
         }
         else
         {
-            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteLiteral(userName)})");
+            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)})");
             queryBuilder.AppendLine("BEGIN");
             queryBuilder.AppendLine($"    CREATE USER {quotedUser} FOR LOGIN {quotedUser};");
             queryBuilder.AppendLine("END");
@@ -795,14 +883,14 @@ END
 
         foreach (var role in SupportedRoles)
         {
-            var quotedRole = QuoteIdentifier(role);
+            var quotedRole = QuoteSqlServerIdentifier(role);
             var wantsRole = desiredRoles.Contains(role, StringComparer.OrdinalIgnoreCase);
             queryBuilder.AppendLine(wantsRole ? "IF NOT EXISTS (" : "IF EXISTS (");
             queryBuilder.AppendLine("    SELECT 1");
             queryBuilder.AppendLine("    FROM sys.database_role_members drm");
             queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
             queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
-            queryBuilder.AppendLine($"    WHERE rp.name = {QuoteLiteral(role)} AND mp.name = {QuoteLiteral(userName)})");
+            queryBuilder.AppendLine($"    WHERE rp.name = {QuoteSqlLiteral(role)} AND mp.name = {QuoteSqlLiteral(userName)})");
             queryBuilder.AppendLine(wantsRole
                 ? $"    ALTER ROLE {quotedRole} ADD MEMBER {quotedUser};"
                 : $"    ALTER ROLE {quotedRole} DROP MEMBER {quotedUser};");
@@ -811,7 +899,228 @@ END
         return queryBuilder.ToString();
     }
 
-    private static List<string> NormalizeRoles(IReadOnlyList<string> inputRoles)
+    private static string BuildPostgreSqlRoleMembershipSyncQuery(string databaseName, string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
+    {
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var quotedUser = QuotePostgreSqlIdentifier(userName);
+        var queryBuilder = new StringBuilder();
+        queryBuilder.AppendLine(BuildEnsurePostgreSqlManagedRolesQuery(databaseName));
+        if (failIfUserMissing)
+        {
+            queryBuilder.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
+        }
+
+        foreach (var role in SupportedRoles)
+        {
+            var managedRole = roleMap[role];
+            queryBuilder.AppendLine(desiredRoles.Contains(role, StringComparer.OrdinalIgnoreCase)
+                ? $"GRANT {QuotePostgreSqlIdentifier(managedRole)} TO {quotedUser};"
+                : $"REVOKE {QuotePostgreSqlIdentifier(managedRole)} FROM {quotedUser};");
+        }
+
+        return queryBuilder.ToString();
+    }
+
+    private static string BuildAddRolesQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> roles)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            var queryBuilder = new StringBuilder();
+            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)})");
+            queryBuilder.AppendLine("    THROW 50000, 'Database user does not exist.', 1;");
+
+            foreach (var role in roles)
+            {
+                queryBuilder.AppendLine("IF NOT EXISTS (");
+                queryBuilder.AppendLine("    SELECT 1");
+                queryBuilder.AppendLine("    FROM sys.database_role_members drm");
+                queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
+                queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
+                queryBuilder.AppendLine($"    WHERE rp.name = {QuoteSqlLiteral(role)} AND mp.name = {QuoteSqlLiteral(userName)})");
+                queryBuilder.AppendLine($"    ALTER ROLE {QuoteSqlServerIdentifier(role)} ADD MEMBER {QuoteSqlServerIdentifier(userName)};");
+            }
+
+            return queryBuilder.ToString();
+        }
+
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var query = new StringBuilder();
+        query.AppendLine(BuildEnsurePostgreSqlManagedRolesQuery(databaseName));
+        query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
+        foreach (var role in roles)
+        {
+            query.AppendLine($"GRANT {QuotePostgreSqlIdentifier(roleMap[role])} TO {QuotePostgreSqlIdentifier(userName)};");
+        }
+
+        return query.ToString();
+    }
+
+    private static string BuildRemoveRolesQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> roles)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            var queryBuilder = new StringBuilder();
+            queryBuilder.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)})");
+            queryBuilder.AppendLine("    THROW 50000, 'Database user does not exist.', 1;");
+
+            foreach (var role in roles)
+            {
+                queryBuilder.AppendLine("IF EXISTS (");
+                queryBuilder.AppendLine("    SELECT 1");
+                queryBuilder.AppendLine("    FROM sys.database_role_members drm");
+                queryBuilder.AppendLine("    INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id");
+                queryBuilder.AppendLine("    INNER JOIN sys.database_principals mp ON drm.member_principal_id = mp.principal_id");
+                queryBuilder.AppendLine($"    WHERE rp.name = {QuoteSqlLiteral(role)} AND mp.name = {QuoteSqlLiteral(userName)})");
+                queryBuilder.AppendLine($"    ALTER ROLE {QuoteSqlServerIdentifier(role)} DROP MEMBER {QuoteSqlServerIdentifier(userName)};");
+            }
+
+            return queryBuilder.ToString();
+        }
+
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var query = new StringBuilder();
+        query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
+        foreach (var role in roles)
+        {
+            query.AppendLine($"REVOKE {QuotePostgreSqlIdentifier(roleMap[role])} FROM {QuotePostgreSqlIdentifier(userName)};");
+        }
+
+        return query.ToString();
+    }
+
+    private static string BuildRemoveDatabaseUserQuery(ResolvedServerContext context, string databaseName, string userName)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            return $"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)}) DROP USER {QuoteSqlServerIdentifier(userName)};";
+        }
+
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var query = new StringBuilder();
+        query.AppendLine($"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN");
+        foreach (var managedRole in roleMap.Values)
+        {
+            query.AppendLine($"    REVOKE {QuotePostgreSqlIdentifier(managedRole)} FROM {QuotePostgreSqlIdentifier(userName)};");
+        }
+        query.AppendLine("END IF; END $$;");
+        return query.ToString();
+    }
+
+    private static string BuildDropLoginQuery(ResolvedServerContext context, string userName)
+        => IsSqlServer(context.Provider)
+            ? $"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)}) DROP LOGIN {QuoteSqlServerIdentifier(userName)};"
+            : $"DROP ROLE IF EXISTS {QuotePostgreSqlIdentifier(userName)};";
+
+    private static string BuildPostgreSqlShowUsersQuery(string databaseName)
+    {
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var ownerRole = roleMap["db_owner"];
+        var readerRole = roleMap["db_datareader"];
+        var writerRole = roleMap["db_datawriter"];
+
+        return $"""
+SELECT
+    member.rolname AS username,
+    member.rolname AS loginname,
+    COALESCE(string_agg(mapped.role_name, ', ' ORDER BY mapped.sort_order), '') AS roles
+FROM pg_roles member
+LEFT JOIN (
+    SELECT
+        auth.member,
+        CASE role.rolname
+            WHEN {QuotePostgreSqlLiteral(ownerRole)} THEN 'db_owner'
+            WHEN {QuotePostgreSqlLiteral(readerRole)} THEN 'db_datareader'
+            WHEN {QuotePostgreSqlLiteral(writerRole)} THEN 'db_datawriter'
+        END AS role_name,
+        CASE role.rolname
+            WHEN {QuotePostgreSqlLiteral(ownerRole)} THEN 1
+            WHEN {QuotePostgreSqlLiteral(readerRole)} THEN 2
+            WHEN {QuotePostgreSqlLiteral(writerRole)} THEN 3
+        END AS sort_order
+    FROM pg_auth_members auth
+    INNER JOIN pg_roles role ON role.oid = auth.roleid
+    WHERE role.rolname IN ({QuotePostgreSqlLiteral(ownerRole)}, {QuotePostgreSqlLiteral(readerRole)}, {QuotePostgreSqlLiteral(writerRole)})
+) mapped ON mapped.member = member.oid
+WHERE member.rolcanlogin
+GROUP BY member.rolname
+HAVING COUNT(mapped.role_name) > 0
+ORDER BY member.rolname;
+""";
+    }
+
+    private static Dictionary<string, string> GetPostgreSqlManagedRoleMap(string databaseName)
+        => new(StringComparer.OrdinalIgnoreCase)
+        {
+            ["db_owner"] = BuildPostgreSqlManagedRoleName(databaseName, "owner"),
+            ["db_datareader"] = BuildPostgreSqlManagedRoleName(databaseName, "reader"),
+            ["db_datawriter"] = BuildPostgreSqlManagedRoleName(databaseName, "writer")
+        };
+
+    private static string BuildEnsurePostgreSqlManagedRolesQuery(string databaseName)
+    {
+        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+        var quotedDatabase = QuotePostgreSqlIdentifier(databaseName);
+        var query = new StringBuilder();
+
+        foreach (var managedRole in roleMap.Values)
+        {
+            query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(managedRole)}) THEN CREATE ROLE {QuotePostgreSqlIdentifier(managedRole)} NOLOGIN; END IF; END $$;");
+        }
+
+        var ownerRole = QuotePostgreSqlIdentifier(roleMap["db_owner"]);
+        var readerRole = QuotePostgreSqlIdentifier(roleMap["db_datareader"]);
+        var writerRole = QuotePostgreSqlIdentifier(roleMap["db_datawriter"]);
+
+        query.AppendLine($"GRANT CONNECT, TEMP, CREATE ON DATABASE {quotedDatabase} TO {ownerRole};");
+        query.AppendLine($"GRANT USAGE, CREATE ON SCHEMA public TO {ownerRole};");
+        query.AppendLine($"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {ownerRole};");
+        query.AppendLine($"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {ownerRole};");
+        query.AppendLine($"GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO {ownerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO {ownerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO {ownerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO {ownerRole};");
+
+        query.AppendLine($"GRANT CONNECT ON DATABASE {quotedDatabase} TO {readerRole};");
+        query.AppendLine($"GRANT USAGE ON SCHEMA public TO {readerRole};");
+        query.AppendLine($"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {readerRole};");
+        query.AppendLine($"GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO {readerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO {readerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO {readerRole};");
+
+        query.AppendLine($"GRANT CONNECT ON DATABASE {quotedDatabase} TO {writerRole};");
+        query.AppendLine($"GRANT USAGE ON SCHEMA public TO {writerRole};");
+        query.AppendLine($"GRANT INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public TO {writerRole};");
+        query.AppendLine($"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {writerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO {writerRole};");
+        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {writerRole};");
+
+        return query.ToString();
+    }
+
+    private static string BuildPostgreSqlManagedRoleName(string databaseName, string suffix)
+    {
+        var normalized = new string(databaseName
+            .ToLowerInvariant()
+            .Select(character => char.IsLetterOrDigit(character) ? character : '_')
+            .ToArray())
+            .Trim('_');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            normalized = "database";
+        }
+
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(databaseName))).ToLowerInvariant()[..8];
+        var prefix = $"sqlmgr_{suffix}_";
+        var maxBodyLength = 63 - prefix.Length - hash.Length - 1;
+        if (normalized.Length > maxBodyLength)
+        {
+            normalized = normalized[..maxBodyLength];
+        }
+
+        return $"{prefix}{normalized}_{hash}";
+    }
+
+    private static List<string> NormalizeRoles(IReadOnlyList<string> inputRoles, string provider)
     {
         var normalized = new List<string>();
         foreach (var role in inputRoles)
@@ -821,7 +1130,7 @@ END
                 "dbowner" or "db_owner" => "db_owner",
                 "dbreader" or "db_reader" or "db_datareader" => "db_datareader",
                 "dbwriter" or "db_writer" or "db_datawriter" => "db_datawriter",
-                _ => throw new UserInputException($"Unsupported role '{role}'. Use dbowner/db_owner, dbreader/db_reader/db_datareader, or dbwriter/db_writer/db_datawriter.")
+                _ => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. Use dbowner/db_owner, dbreader/db_reader/db_datareader, or dbwriter/db_writer/db_datawriter.")
             });
         }
 
@@ -835,13 +1144,32 @@ END
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-    private static string BuildConnectionString(string server, string database, string username, string? password)
-        => $"Server={server};Database={database};User ID={username};Password={(string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : password)};Encrypt=True;TrustServerCertificate=True;";
+    private static string BuildConnectionString(string provider, string server, int? port, string database, string username, string? password)
+    {
+        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : password;
+        if (IsSqlServer(provider))
+        {
+            var dataSource = port is > 0 ? $"{server},{port.Value}" : server;
+            return $"Server={dataSource};Database={database};User ID={username};Password={resolvedPassword};Encrypt=True;TrustServerCertificate=True;";
+        }
 
-    private static string QuoteIdentifier(string name)
+        var portSegment = port is > 0 ? $";Port={port.Value}" : string.Empty;
+        return $"Host={server}{portSegment};Database={database};Username={username};Password={resolvedPassword};Ssl Mode=Require;";
+    }
+
+    private static bool IsSqlServer(string provider)
+        => SqlProviders.Normalize(provider) == SqlProviders.SqlServer;
+
+    private static string QuoteSqlServerIdentifier(string name)
         => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
 
-    private static string QuoteLiteral(string value)
+    private static string QuotePostgreSqlIdentifier(string name)
+        => $"\"{name.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
+
+    private static string QuoteSqlLiteral(string value)
+        => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+    private static string QuotePostgreSqlLiteral(string value)
         => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
     private static string Require(string? value, string errorMessage)
@@ -867,6 +1195,10 @@ END
             }
 
             return OperationResult.Failure($"SQL Server error: {exception.Message}");
+        }
+        catch (NpgsqlException exception)
+        {
+            return OperationResult.Failure($"PostgreSQL error: {exception.Message}");
         }
         catch (IOException exception)
         {
@@ -912,6 +1244,10 @@ END
             }
 
             return OperationResult<T>.Failure($"SQL Server error: {exception.Message}");
+        }
+        catch (NpgsqlException exception)
+        {
+            return OperationResult<T>.Failure($"PostgreSQL error: {exception.Message}");
         }
         catch (IOException exception)
         {

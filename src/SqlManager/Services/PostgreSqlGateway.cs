@@ -1,8 +1,8 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SqlManager;
 
-internal sealed class SqlServerGateway
+internal sealed class PostgreSqlGateway
 {
     public async Task ExecuteNonQueryAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
     {
@@ -63,30 +63,8 @@ internal sealed class SqlServerGateway
         return results;
     }
 
-    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, string query, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
     {
-        const string query = """
-SELECT
-    dp.name AS UserName,
-    ISNULL(SUSER_SNAME(dp.sid), '') AS LoginName,
-    ISNULL(
-        STUFF((
-            SELECT ', ' + rp.name
-            FROM sys.database_role_members drm
-            INNER JOIN sys.database_principals rp ON drm.role_principal_id = rp.principal_id
-            WHERE drm.member_principal_id = dp.principal_id
-            ORDER BY rp.name
-            FOR XML PATH(''), TYPE
-        ).value('.', 'nvarchar(max)'), 1, 2, ''),
-        ''
-    ) AS Roles
-FROM sys.database_principals dp
-WHERE dp.type IN ('S', 'U', 'G')
-  AND dp.principal_id > 4
-  AND dp.name NOT IN ('dbo', 'guest', 'INFORMATION_SCHEMA', 'sys')
-ORDER BY dp.name;
-""";
-
         var rows = new List<DatabaseUserRow>();
         await ExecuteWithCommandAsync(
             server,
@@ -122,12 +100,12 @@ ORDER BY dp.name;
         string query,
         string database,
         SqlTimeoutConfig timeouts,
-        Func<SqlCommand, Task<T>> execute,
+        Func<NpgsqlCommand, Task<T>> execute,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var connection = new SqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds));
+        await using var connection = new NpgsqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds));
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         connectionCancellation.CancelAfter(TimeSpan.FromSeconds(timeouts.ConnectionTimeoutSeconds));
 
@@ -135,14 +113,14 @@ ORDER BY dp.name;
         {
             await connection.OpenAsync(connectionCancellation.Token);
             await using var command = CreateCommand(query, connection, timeouts.CommandTimeoutSeconds);
-            using var registration = cancellationToken.Register(static state => CancelCommand((SqlCommand)state!), command);
+            using var registration = cancellationToken.Register(static state => CancelCommand((NpgsqlCommand)state!), command);
             return await execute(command);
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested && connectionCancellation.IsCancellationRequested)
         {
-            throw new TimeoutException($"Timed out connecting to SQL Server '{server}' after {timeouts.ConnectionTimeoutSeconds} seconds.", exception);
+            throw new TimeoutException($"Timed out connecting to PostgreSQL '{server}' after {timeouts.ConnectionTimeoutSeconds} seconds.", exception);
         }
-        catch (SqlException exception) when (cancellationToken.IsCancellationRequested)
+        catch (NpgsqlException exception) when (cancellationToken.IsCancellationRequested)
         {
             throw new OperationCanceledException("Operation cancelled.", exception, cancellationToken);
         }
@@ -152,13 +130,13 @@ ORDER BY dp.name;
         }
     }
 
-    private static SqlCommand CreateCommand(string query, SqlConnection connection, int commandTimeoutSeconds)
+    private static NpgsqlCommand CreateCommand(string query, NpgsqlConnection connection, int commandTimeoutSeconds)
         => new(query, connection)
         {
             CommandTimeout = commandTimeoutSeconds
         };
 
-    private static void CancelCommand(SqlCommand command)
+    private static void CancelCommand(NpgsqlCommand command)
     {
         try
         {
@@ -172,18 +150,21 @@ ORDER BY dp.name;
 
     private static string BuildAdminConnectionString(string server, int? port, string username, string password, string database, int connectionTimeoutSeconds)
     {
-        var builder = new SqlConnectionStringBuilder
+        var builder = new NpgsqlConnectionStringBuilder
         {
-            DataSource = port is > 0 ? $"{server},{port.Value}" : server,
-            InitialCatalog = database,
-            UserID = username,
+            Host = server,
+            Database = database,
+            Username = username,
             Password = password,
-            Encrypt = true,
-            TrustServerCertificate = true,
-            ConnectTimeout = connectionTimeoutSeconds,
-            ConnectRetryCount = 0,
-            MultipleActiveResultSets = false
+            SslMode = SslMode.Require,
+            Timeout = connectionTimeoutSeconds,
+            CommandTimeout = 0
         };
+
+        if (port is > 0)
+        {
+            builder.Port = port.Value;
+        }
 
         return builder.ConnectionString;
     }

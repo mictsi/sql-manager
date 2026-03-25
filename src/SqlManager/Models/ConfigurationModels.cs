@@ -1,5 +1,27 @@
 namespace SqlManager;
 
+internal static class SqlProviders
+{
+    public const string SqlServer = "sqlserver";
+    public const string PostgreSql = "postgresql";
+
+    public static string Normalize(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? SqlServer
+            : value.Trim().ToLowerInvariant() switch
+            {
+                "sqlserver" or "sql-server" or "mssql" => SqlServer,
+                "postgresql" or "postgres" or "pgsql" => PostgreSql,
+                _ => throw new UserInputException($"Unsupported provider '{value}'. Use sqlserver or postgresql.")
+            };
+
+    public static string GetDisplayName(string provider)
+        => Normalize(provider) == PostgreSql ? "PostgreSQL" : "SQL Server";
+
+    public static string GetDefaultAdminDatabase(string provider)
+        => Normalize(provider) == PostgreSql ? "postgres" : "master";
+}
+
 internal sealed class SqlManagerConfig
 {
     public string SelectedServerName { get; set; } = string.Empty;
@@ -19,6 +41,9 @@ internal sealed class SqlTimeoutConfig
 internal sealed class ServerConfig
 {
     public string ServerName { get; set; } = string.Empty;
+    public string Provider { get; set; } = SqlProviders.SqlServer;
+    public int? Port { get; set; }
+    public string AdminDatabase { get; set; } = string.Empty;
     public string AdminUsername { get; set; } = string.Empty;
     public string AdminPassword { get; set; } = string.Empty;
     public List<DatabaseConfig> Databases { get; set; } = [];
@@ -44,6 +69,9 @@ internal sealed record ResolvedServerContext(
     SqlManagerConfig Config,
     ServerConfig? ServerConfig,
     string ServerName,
+    string Provider,
+    int? Port,
+    string AdminDatabase,
     string AdminUsername,
     string AdminPassword,
     SqlTimeoutConfig Timeouts);

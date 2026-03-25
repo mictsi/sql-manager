@@ -121,6 +121,7 @@ internal sealed class TerminalUi
             .Border(TableBorder.Rounded)
             .AddColumn("Active")
             .AddColumn("Server")
+            .AddColumn("Provider")
             .AddColumn("Admin User")
             .AddColumn("Databases")
             .AddColumn("Users");
@@ -132,6 +133,7 @@ internal sealed class TerminalUi
             table.AddRow(
                 isActive ? "*" : string.Empty,
                 server.ServerName,
+                SqlProviders.GetDisplayName(server.Provider),
                 string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername,
                 server.Databases.Count.ToString(),
                 server.Databases.Sum(database => database.Users.Count).ToString());
@@ -335,8 +337,8 @@ internal sealed class TerminalUi
         WritePlainLine("  sql-manager --version");
         WritePlainLine("  sql-manager tui");
         WritePlainLine("  sql-manager view-config --config-path <path>");
-        WritePlainLine("  sql-manager init-config --config-path <path> --server-name <server> --admin-username <user> [--admin-password <password>]");
-        WritePlainLine("  sql-manager add-server --server-name <server> --admin-username <user> [--admin-password <password>]");
+        WritePlainLine("  sql-manager init-config --config-path <path> --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]");
+        WritePlainLine("  sql-manager add-server --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]");
         WritePlainLine("  sql-manager select-server --server-name <server>");
         WritePlainLine("  sql-manager sync-server --server-name <server> --admin-username <user> --admin-password <password>");
         WritePlainLine("  sql-manager show-databases --admin-password <password>");
@@ -351,6 +353,7 @@ internal sealed class TerminalUi
         WritePlainLine("  sql-manager help");
         _console.MarkupLine($"[grey]Default config path: {Markup.Escape(defaultConfigPath)}[/]");
         _console.MarkupLine("[grey]PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.[/]");
+        _console.MarkupLine("[grey]Generic roles are translated per provider: db_owner, db_datareader, db_datawriter.[/]");
     }
 
     private static void WritePlainLine(string text)

@@ -68,6 +68,9 @@ internal sealed class ConfigStore
             var server = new ServerConfig
             {
                 ServerName = serverNode["serverName"]?.GetValue<string>() ?? string.Empty,
+                Provider = serverNode["provider"]?.GetValue<string>() ?? SqlProviders.SqlServer,
+                Port = serverNode["port"]?.GetValue<int?>(),
+                AdminDatabase = serverNode["adminDatabase"]?.GetValue<string>() ?? string.Empty,
                 AdminUsername = serverNode["adminUsername"]?.GetValue<string>() ?? string.Empty,
                 AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty
             };
@@ -148,6 +151,7 @@ internal sealed class ConfigStore
             var server = new ServerConfig
             {
                 ServerName = group.Key,
+                Provider = SqlProviders.SqlServer,
                 AdminUsername = legacyAdminUsername,
                 AdminPassword = string.Empty
             };
@@ -186,6 +190,7 @@ internal sealed class ConfigStore
             config.Servers.Add(new ServerConfig
             {
                 ServerName = legacySelectedServer,
+                Provider = SqlProviders.SqlServer,
                 AdminUsername = legacyAdminUsername,
                 AdminPassword = string.Empty
             });
@@ -221,6 +226,13 @@ internal sealed class ConfigStore
         foreach (var server in config.Servers)
         {
             server.ServerName ??= string.Empty;
+            server.Provider = SqlProviders.Normalize(server.Provider);
+            if (server.Port is <= 0)
+            {
+                server.Port = null;
+            }
+
+            server.AdminDatabase ??= string.Empty;
             server.AdminUsername ??= string.Empty;
             server.AdminPassword ??= string.Empty;
             server.Databases ??= [];
