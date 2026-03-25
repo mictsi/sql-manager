@@ -21,7 +21,7 @@ internal static class ErrorLogger
     internal static string BuildLogFilePath(string? baseDirectory, string? processPath, string? assemblyName)
     {
         var directory = string.IsNullOrWhiteSpace(baseDirectory) ? AppContext.BaseDirectory : baseDirectory;
-        var fileStem = Path.GetFileNameWithoutExtension(processPath);
+        var fileStem = GetFileStem(processPath);
 
         if (string.IsNullOrWhiteSpace(fileStem))
         {
@@ -34,6 +34,21 @@ internal static class ErrorLogger
         }
 
         return Path.Combine(directory, $"{fileStem}.log");
+    }
+
+    private static string? GetFileStem(string? processPath)
+    {
+        if (string.IsNullOrWhiteSpace(processPath))
+        {
+            return null;
+        }
+
+        var lastSeparatorIndex = processPath.LastIndexOfAny(['\\', '/']);
+        var fileName = lastSeparatorIndex >= 0
+            ? processPath[(lastSeparatorIndex + 1)..]
+            : processPath;
+
+        return Path.GetFileNameWithoutExtension(fileName);
     }
 
     internal static void WriteEntry(string context, string details, string? logFilePath)
