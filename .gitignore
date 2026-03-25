@@ -22,6 +22,8 @@ bld/
 [Oo]bj/
 [Ll]og/
 [Ll]ogs/
+[Tt]emp/
+
 
 # .NET Core
 project.lock.json
@@ -52,3 +54,5 @@ CodeCoverage/
 *.VisualState.xml
 TestResult.xml
 nunit-*.xml
+
+sql-manager.ps1

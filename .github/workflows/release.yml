@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    env:
+      DOTNET_NOLOGO: true
+      BUILD_CONFIGURATION: Release
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tagName = '${{ github.ref_name }}'
+
+          if ($tagName -notmatch '^\d+\.\d+\.\d+(?:\.\d+)?$') {
+              throw "Tag '$tagName' must be a numeric version like 1.0.0 or 1.0.0.1."
+          }
+
+          "tag_name=$tagName" >> $env:GITHUB_OUTPUT
+          "version=$tagName" >> $env:GITHUB_OUTPUT
+
+      - name: Restore and validate
+        shell: pwsh
+        run: ./test.ps1 -Configuration $env:BUILD_CONFIGURATION
+
+      - name: Publish release binaries
+        shell: pwsh
+        run: ./build.ps1 -Target Prod -Runtime All -VersionOverride ${{ steps.version.outputs.version }} -Clean
+
+      - name: Package release assets
+        shell: pwsh
+        run: |
+          $releaseAssetDirectory = Join-Path $PWD 'release-assets'
+          $prodDirectory = Join-Path $PWD 'artifacts/prod'
+          $tagName = '${{ steps.version.outputs.tag_name }}'
+          $safeTagName = $tagName -replace '[^0-9A-Za-z._-]', '-'
+
+          if (-not (Test-Path $prodDirectory)) {
+              throw "Publish output directory not found: $prodDirectory"
+          }
+
+          New-Item -ItemType Directory -Path $releaseAssetDirectory -Force | Out-Null
+
+          $runtimeDirectories = Get-ChildItem -Path $prodDirectory -Directory | Sort-Object -Property Name
+
+          if ($runtimeDirectories.Count -eq 0) {
+              throw 'No runtime outputs found under artifacts/prod.'
+          }
+
+          foreach ($runtimeDirectory in $runtimeDirectories) {
+              $archiveName = "sql-manager-$safeTagName-$($runtimeDirectory.Name).zip"
+              $archivePath = Join-Path $releaseAssetDirectory $archiveName
+
+              if (Test-Path $archivePath) {
+                  Remove-Item -Path $archivePath -Force
+              }
+
+              Compress-Archive -Path (Join-Path $runtimeDirectory.FullName '*') -DestinationPath $archivePath
+          }
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release-assets/*.zip

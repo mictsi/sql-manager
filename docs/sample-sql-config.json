@@ -1,0 +1,29 @@
+{
+  "selectedServerName": "",
+  "timeouts": {
+    "connectionTimeoutSeconds": 15,
+    "commandTimeoutSeconds": 30
+  },
+  "servers": [
+    {
+      "serverName": "",
+      "adminUsername": "sa",
+      "adminPassword": "",
+      "databases": [
+        {
+          "databaseName": "",
+          "users": [
+            {
+              "username": "",
+              "password": "",
+              "roles": [
+                "db_owner"
+              ],
+              "connectionString": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
