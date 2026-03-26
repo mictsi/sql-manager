@@ -14,6 +14,7 @@ internal sealed class TerminalGuiRunner
     private const string ManualEntryChoice = "<Enter manually>";
 
     private readonly SqlManagerService _service;
+    private readonly PasswordGenerator _passwordGenerator = new();
     private readonly ProtectedSessionSecret _configEncryptionPassword = new();
     private IApplication? _app;
     private CancellationToken _cancellationToken;
@@ -1167,7 +1168,7 @@ internal sealed class TerminalGuiRunner
             {
                 dialog.Add(new Label { X = 1, Y = 1, Text = $"User: {userName}" });
                 var nextY = AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
-                AddField(dialog, nextY, "New Password (optional):", newPasswordField);
+                AddPasswordFieldWithGenerateButton(dialog, nextY, "New Password (optional):", newPasswordField, "Update Password");
             },
             () => ExecuteDatabaseSaveOperation(_service.UpdatePasswordAsync(new CommandOptions
             {
@@ -1221,7 +1222,7 @@ internal sealed class TerminalGuiRunner
 
                 if (includePasswordField && passwordField is not null)
                 {
-                    AddField(dialog, currentY, "User Password (optional):", passwordField);
+                    AddPasswordFieldWithGenerateButton(dialog, currentY, "User Password (optional):", passwordField, title);
                     currentY += 2;
                 }
 
@@ -2111,6 +2112,39 @@ internal sealed class TerminalGuiRunner
         dialog.Add(new Label { X = 1, Y = y, Text = label });
         field.Y = y;
         dialog.Add(field);
+    }
+
+    private void AddPasswordFieldWithGenerateButton(Dialog dialog, int y, string label, TextField field, string title)
+    {
+        AddField(dialog, y, label, field);
+        field.Width = 42;
+
+        var generateButton = new Button
+        {
+            X = Pos.Right(field) + 1,
+            Y = y,
+            Width = 12,
+            Text = "Generate",
+            TabStop = TabBehavior.TabStop
+        };
+
+        generateButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RunGuardedUiAction(title, () =>
+            {
+                var generatedPassword = _passwordGenerator.Generate();
+                field.Text = generatedPassword;
+                field.SetFocus();
+                MessageBox.Query(
+                    RequireApp(),
+                    title,
+                    $"Generated password:{Environment.NewLine}{Environment.NewLine}{generatedPassword}",
+                    "OK");
+            });
+        };
+
+        dialog.Add(generateButton);
     }
 
     private static int AddAdminCredentialSection(Dialog dialog, int y, ServerConfig server, TextField adminUserField, TextField adminPasswordField)
