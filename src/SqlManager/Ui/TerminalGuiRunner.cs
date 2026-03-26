@@ -12,6 +12,7 @@ internal sealed class TerminalGuiRunner
     private const string ManualEntryChoice = "<Enter manually>";
 
     private readonly SqlManagerService _service;
+    private readonly ProtectedSessionSecret _configEncryptionPassword = new();
     private IApplication? _app;
     private CancellationToken _cancellationToken;
     private string _configPath = string.Empty;
@@ -48,34 +49,41 @@ internal sealed class TerminalGuiRunner
             }
         });
 
-        var summary = WaitForTaskCompletion(
-            _service.LoadConfigSummaryAsync(configPath, cancellationToken),
-            "Loading Config",
-            "Loading configuration...");
-        if (!summary.Succeeded || summary.Value is null)
+        try
         {
-            MessageBox.ErrorQuery(app, "SQL Manager", summary.Message, "OK");
-            return summary.ExitCode;
+            var summary = WaitForTaskCompletion(
+                _service.LoadConfigSummaryAsync(configPath, GetConfigEncryptionPassword(), cancellationToken),
+                "Loading Config",
+                "Loading configuration...");
+            if (!summary.Succeeded || summary.Value is null)
+            {
+                MessageBox.ErrorQuery(app, "SQL Manager", summary.Message, "OK");
+                return summary.ExitCode;
+            }
+
+            _config = summary.Value;
+            _activeServer = ResolveActiveServerName(_config);
+
+            var window = new Window
+            {
+                Title = $"SQL Manager v{AppVersion.DisplayVersion}",
+                X = 0,
+                Y = 0,
+                Width = Dim.Fill(),
+                Height = Dim.Fill(),
+                TabStop = TabBehavior.TabGroup
+            };
+
+            BuildMainWindow(window);
+            RefreshViews();
+            _initialMainButton?.SetFocus();
+            app.Run(window);
+            return _exitCode;
         }
-
-        _config = summary.Value;
-        _activeServer = ResolveActiveServerName(_config);
-
-        var window = new Window
+        finally
         {
-            Title = $"SQL Manager v{AppVersion.DisplayVersion}",
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(),
-            TabStop = TabBehavior.TabGroup
-        };
-
-        BuildMainWindow(window);
-        RefreshViews();
-        _initialMainButton?.SetFocus();
-        app.Run(window);
-        return _exitCode;
+            _configEncryptionPassword.Dispose();
+        }
     }
 
     private void BuildMainWindow(Window window)
@@ -100,6 +108,7 @@ internal sealed class TerminalGuiRunner
         {
             ("Select Active Server", (Action)ShowSelectServerDialog),
             ("Add Server", (Action)ShowAddServerDialog),
+            ("Edit Server", (Action)ShowEditServerDialog),
             ("Sync Server", (Action)ShowSyncServerDialog),
             ("Show Databases", (Action)ShowDatabasesDialog),
             ("Create Database", (Action)ShowCreateDatabaseDialog),
@@ -119,6 +128,7 @@ internal sealed class TerminalGuiRunner
         {
             ("View Config", (Action)ShowConfigDialog),
             ("Initialize Config", (Action)ShowInitializeConfigDialog),
+            ("Toggle Encrypt Passwords", (Action)ShowPasswordEncryptionDialog),
             ("Refresh", (Action)ReloadAndRefresh),
             ("Exit", (Action)(() => RequireApp().RequestStop()))
         };
@@ -193,7 +203,7 @@ internal sealed class TerminalGuiRunner
     private void ReloadAndRefresh()
     {
         var summary = WaitForTaskCompletion(
-            _service.LoadConfigSummaryAsync(_configPath, _cancellationToken),
+            _service.LoadConfigSummaryAsync(_configPath, GetConfigEncryptionPassword(), _cancellationToken),
             "Refreshing",
             "Reloading configuration...");
         if (!summary.Succeeded || summary.Value is null)
@@ -219,6 +229,7 @@ internal sealed class TerminalGuiRunner
         {
             $"Config Path: {_configPath}",
             $"Selected Server: {(string.IsNullOrWhiteSpace(_config.SelectedServerName) ? "<none>" : _config.SelectedServerName)}",
+            $"Password Encryption: {(_config.EncryptPasswords ? $"enabled ({(_configEncryptionPassword.HasValue ? "unlocked" : "locked")})" : "disabled")}",
             $"Connection Timeout: {_config.Timeouts.ConnectionTimeoutSeconds}s",
             $"Command Timeout: {_config.Timeouts.CommandTimeoutSeconds}s",
             $"Configured Servers: {_config.Servers.Count}",
@@ -235,12 +246,197 @@ internal sealed class TerminalGuiRunner
                 lines.Add($"  Database: {database.DatabaseName}");
                 foreach (var user in database.Users.OrderBy(user => user.Username, StringComparer.OrdinalIgnoreCase))
                 {
-                    lines.Add($"    User: {user.Username} | Roles: {string.Join(", ", user.Roles)}");
+                    lines.Add($"    User: {user.Username} | Password: {BuildPasswordState(user.Password, user.Encrypted)} | Roles: {string.Join(", ", user.Roles)}");
                 }
             }
         }
 
         ShowTextDialog("Config", string.Join(Environment.NewLine, lines));
+    }
+
+    private void ShowPasswordEncryptionDialog()
+    {
+        if (!_config.EncryptPasswords)
+        {
+            ShowEnablePasswordEncryptionDialog();
+            return;
+        }
+
+        if (_configEncryptionPassword.HasValue)
+        {
+            var action = MessageBox.Query(
+                RequireApp(),
+                "Encrypt Passwords",
+                "encryptPasswords is enabled and currently unlocked.",
+                "Turn Off",
+                "Relock",
+                "Cancel");
+
+            if (action == 0)
+            {
+                ShowDisablePasswordEncryptionDialog(promptForPassword: false);
+                return;
+            }
+
+            if (action == 1)
+            {
+                _configEncryptionPassword.Clear();
+                ReloadAndRefresh();
+                MessageBox.Query(RequireApp(), "Encrypt Passwords", "Stored passwords are locked again for this session.", "OK");
+            }
+
+            return;
+        }
+
+        var lockedAction = MessageBox.Query(
+            RequireApp(),
+            "Encrypt Passwords",
+            "encryptPasswords is enabled and currently locked.",
+            "Unlock",
+            "Turn Off",
+            "Cancel");
+
+        if (lockedAction == 0)
+        {
+            ShowUnlockPasswordEncryptionDialog();
+            return;
+        }
+
+        if (lockedAction == 1)
+        {
+            ShowDisablePasswordEncryptionDialog(promptForPassword: true);
+        }
+    }
+
+    private void ShowEnablePasswordEncryptionDialog()
+    {
+        var passwordField = CreateSecretField();
+        var confirmField = CreateSecretField();
+        var result = ShowFormDialog(
+            "Enable Password Encryption",
+            78,
+            14,
+            dialog =>
+            {
+                dialog.Add(new Label
+                {
+                    X = 1,
+                    Y = 1,
+                    Width = Dim.Fill(2),
+                    Text = "The unlock password must be at least 10 characters and include upper, lower, number, and symbol."
+                });
+                AddField(dialog, 4, "Unlock Password:", passwordField);
+                AddField(dialog, 6, "Confirm Password:", confirmField);
+            },
+            () =>
+            {
+                var password = GetRequiredText(passwordField, "Unlock password is required.");
+                var confirmation = GetRequiredText(confirmField, "Password confirmation is required.");
+                if (!string.Equals(password, confirmation, StringComparison.Ordinal))
+                {
+                    throw new UserInputException("The unlock passwords do not match.");
+                }
+
+                var operation = WaitForTaskCompletion(
+                    _service.ConfigurePasswordEncryptionAsync(_configPath, true, password, _cancellationToken),
+                    "Enable Password Encryption",
+                    "Encrypting stored passwords...");
+                if (operation.Succeeded)
+                {
+                    _configEncryptionPassword.Set(password);
+                    ReloadAndRefresh();
+                }
+
+                return OperationExecutionResult.FromResult(operation);
+            });
+
+        if (result?.Result is not null)
+        {
+            ShowResult(result.Result);
+        }
+    }
+
+    private void ShowUnlockPasswordEncryptionDialog()
+    {
+        var passwordField = CreateSecretField();
+        var result = ShowFormDialog(
+            "Unlock Passwords",
+            72,
+            10,
+            dialog => AddField(dialog, 1, "Encryption Password:", passwordField),
+            () =>
+            {
+                var password = GetRequiredText(passwordField, "Encryption password is required.");
+                var summary = WaitForTaskCompletion(
+                    _service.LoadConfigSummaryAsync(_configPath, password, _cancellationToken),
+                    "Unlock Passwords",
+                    "Validating encryption password...");
+                if (!summary.Succeeded || summary.Value is null)
+                {
+                    return OperationExecutionResult.Failure(OperationResult.Failure(summary.Message, summary.ExitCode, summary.Details.ToArray()));
+                }
+
+                _configEncryptionPassword.Set(password);
+                _config = summary.Value;
+                if (string.IsNullOrWhiteSpace(_activeServer)
+                    || _config.Servers.All(server => !server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase)))
+                {
+                    _activeServer = ResolveActiveServerName(_config);
+                }
+
+                RefreshViews();
+                return OperationExecutionResult.FromResult(OperationResult.Success("Password encryption unlocked."));
+            });
+
+        if (result?.Result is not null)
+        {
+            ShowResult(result.Result);
+        }
+    }
+
+    private void ShowDisablePasswordEncryptionDialog(bool promptForPassword)
+    {
+        if (promptForPassword)
+        {
+            var passwordField = CreateSecretField();
+            var result = ShowFormDialog(
+                "Turn Off Encrypt Passwords",
+                72,
+                10,
+                dialog => AddField(dialog, 1, "Encryption Password:", passwordField),
+                () => DisablePasswordEncryption(GetRequiredText(passwordField, "Encryption password is required.")));
+
+            if (result?.Result is not null)
+            {
+                ShowResult(result.Result);
+            }
+
+            return;
+        }
+
+        var password = GetConfigEncryptionPassword();
+        if (string.IsNullOrWhiteSpace(password))
+        {
+            ShowDisablePasswordEncryptionDialog(promptForPassword: true);
+            return;
+        }
+
+        ShowResult(DisablePasswordEncryption(password).Result!);
+    }
+
+    private OperationExecutionResult DisablePasswordEncryption(string password)
+    {
+        var result = WaitForTaskCompletion(
+            _service.ConfigurePasswordEncryptionAsync(_configPath, false, password, _cancellationToken),
+            "Turn Off Encrypt Passwords",
+            "Writing plaintext passwords back to the config...");
+        if (result.Succeeded)
+        {
+            _configEncryptionPassword.Clear();
+            ReloadAndRefresh();
+        }
+
+        return OperationExecutionResult.FromResult(result);
     }
 
     private void ShowSelectServerDialog()
@@ -266,6 +462,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.SelectServer,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = selectedServer.ServerName
             }, _cancellationToken),
             "Select Active Server",
@@ -300,10 +497,13 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.InitConfig,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = GetText(serverField),
                 AdminUsername = GetText(adminUserField),
                 AdminPassword = GetText(adminPasswordField)
-            }, _cancellationToken), GetText(serverField)));
+            }, _cancellationToken),
+            title: "Initialize Config",
+            newActiveServer: GetText(serverField)));
 
         if (result?.Result is not null)
         {
@@ -313,34 +513,142 @@ internal sealed class TerminalGuiRunner
 
     private void ShowAddServerDialog()
     {
-        var activeConfig = GetActiveServerConfig();
-        var serverField = CreateTextField(_activeServer);
-        var adminUserField = CreateTextField(activeConfig?.AdminUsername);
-        var adminPasswordField = CreateSecretField(activeConfig?.AdminPassword);
+        ShowServerEditorDialog(null);
+    }
 
-        var result = ShowFormDialog(
-            "Add Server",
-            72,
-            14,
-            dialog =>
-            {
-                AddField(dialog, 1, "Server Name:", serverField);
-                AddField(dialog, 3, "Admin User:", adminUserField);
-                AddField(dialog, 5, "Admin Password:", adminPasswordField);
-            },
-            () =>
+    private void ShowEditServerDialog()
+    {
+        if (_config.Servers.Count == 0)
+        {
+            MessageBox.ErrorQuery(RequireApp(), "Edit Server", "No servers are configured.", "OK");
+            return;
+        }
+
+        var items = _config.Servers.Select(BuildServerLine).ToList();
+        var listView = CreateListView(items, Math.Max(0, _config.Servers.FindIndex(server => server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase))));
+        var selection = ShowListDialog("Edit Server", listView, "Edit");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var server = _config.Servers[Math.Clamp(listView.SelectedItem ?? 0, 0, _config.Servers.Count - 1)];
+        ShowServerEditorDialog(server);
+    }
+
+    private void ShowServerEditorDialog(ServerConfig? existingServer)
+    {
+        var isEdit = existingServer is not null;
+        var activeConfig = existingServer ?? GetActiveServerConfig();
+        var serverField = CreateTextField(existingServer?.ServerName ?? _activeServer);
+        var providerField = CreateTextField(existingServer?.Provider ?? activeConfig?.Provider ?? SqlProviders.SqlServer);
+        var portField = CreateTextField(existingServer?.Port?.ToString() ?? activeConfig?.Port?.ToString());
+        var adminDatabaseField = CreateTextField(existingServer?.AdminDatabase ?? activeConfig?.AdminDatabase ?? string.Empty);
+        var adminUserField = CreateTextField(existingServer?.AdminUsername ?? activeConfig?.AdminUsername);
+        var adminPasswordField = CreateSecretField(existingServer?.AdminPassword ?? activeConfig?.AdminPassword);
+
+        var saveButton = new Button { Text = isEdit ? "Save" : "Add" };
+        var showPasswordButton = new Button { Text = "Show Password" };
+        var backButton = new Button { Text = "Back" };
+        var cancelButton = new Button { Text = "Cancel" };
+        var dialog = new Dialog
+        {
+            Title = isEdit ? $"Edit Server: {existingServer!.ServerName}" : "Add Server",
+            Width = 88,
+            Height = 20,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        AddField(dialog, 1, "Server Name:", serverField);
+        AddField(dialog, 3, "Provider:", providerField);
+        AddField(dialog, 5, "Port:", portField);
+        AddField(dialog, 7, "Admin Database:", adminDatabaseField);
+        AddField(dialog, 9, "Admin User:", adminUserField);
+        AddField(dialog, 11, "Admin Password:", adminPasswordField);
+        dialog.Buttons = isEdit
+            ? [saveButton, showPasswordButton, backButton, cancelButton]
+            : [saveButton, backButton, cancelButton];
+
+        OperationExecutionResult? result = null;
+        saveButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RunGuardedUiAction(dialog.Title?.ToString() ?? "Server", () =>
             {
                 var serverName = GetRequiredText(serverField, "Server name is required.");
                 var adminUser = GetRequiredText(adminUserField, "Admin user is required.");
-                return ExecuteOperation(_service.AddServerAsync(new CommandOptions
+                var provider = GetText(providerField);
+                var adminDatabase = GetText(adminDatabaseField);
+                var port = ParseOptionalPort(portField);
+
+                result = isEdit
+                    ? ExecuteOperation(
+                        _service.UpdateServerAsync(
+                            _configPath,
+                            existingServer!.ServerName,
+                            serverName,
+                            provider,
+                            port,
+                            adminDatabase,
+                            adminUser,
+                            GetText(adminPasswordField),
+                            GetConfigEncryptionPassword(),
+                            _cancellationToken),
+                        title: "Edit Server",
+                        newActiveServer: serverName,
+                        selectServerAfterSuccess: true)
+                    : ExecuteOperation(
+                        _service.AddServerAsync(new CommandOptions
+                        {
+                            Command = CommandKind.AddServer,
+                            ConfigPath = _configPath,
+                            EncryptionPassword = GetConfigEncryptionPassword(),
+                            ServerName = serverName,
+                            Provider = provider,
+                            Port = port,
+                            AdminDatabase = adminDatabase,
+                            AdminUsername = adminUser,
+                            AdminPassword = GetText(adminPasswordField)
+                        }, _cancellationToken),
+                        title: "Add Server",
+                        newActiveServer: serverName,
+                        selectServerAfterSuccess: true);
+
+                if (result is not null && !result.Succeeded && result.Result is not null)
                 {
-                    Command = CommandKind.AddServer,
-                    ConfigPath = _configPath,
-                    ServerName = serverName,
-                    AdminUsername = adminUser,
-                    AdminPassword = GetText(adminPasswordField)
-                }, _cancellationToken), serverName, selectServerAfterSuccess: true);
+                    ShowResult(result.Result);
+                    return;
+                }
+
+                dialog.RequestStop();
             });
+        };
+        showPasswordButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            var password = GetText(adminPasswordField);
+            if (string.IsNullOrWhiteSpace(password))
+            {
+                MessageBox.ErrorQuery(RequireApp(), "Show Password", "Password is not available in the current config view.", "OK");
+                return;
+            }
+
+            MessageBox.Query(RequireApp(), $"Password: {GetText(serverField)}", password, "OK");
+        };
+        backButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+        cancelButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+
+        serverField.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
 
         if (result?.Result is not null)
         {
@@ -371,6 +679,7 @@ internal sealed class TerminalGuiRunner
                 {
                     Command = CommandKind.SyncServer,
                     ConfigPath = _configPath,
+                    EncryptionPassword = GetConfigEncryptionPassword(),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField)
@@ -408,6 +717,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.CreateDatabase,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -435,6 +745,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.ShowDatabases,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField)
@@ -492,6 +803,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.RemoveDatabase,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -573,6 +885,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.ShowUsers,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -584,9 +897,7 @@ internal sealed class TerminalGuiRunner
             ShowResult(result.UserResult);
             if (result.UserResult.Value is { Count: > 0 })
             {
-                ShowTextDialog(
-                    $"Users in {databaseName}",
-                    string.Join(Environment.NewLine, result.UserResult.Value.Select(row => $"{row.UserName} | {row.LoginName} | {row.Roles}")));
+                ShowUserEntriesDialog(server, databaseName, result.UserResult.Value);
             }
         }
         else if (result?.Result is not null)
@@ -687,6 +998,7 @@ internal sealed class TerminalGuiRunner
                 {
                     Command = CommandKind.RemoveUser,
                     ConfigPath = _configPath,
+                    EncryptionPassword = GetConfigEncryptionPassword(),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -736,6 +1048,7 @@ internal sealed class TerminalGuiRunner
             {
                 Command = CommandKind.UpdatePassword,
                 ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -843,6 +1156,7 @@ internal sealed class TerminalGuiRunner
                 {
                     Command = CommandKind.CreateUser,
                     ConfigPath = _configPath,
+                    EncryptionPassword = GetConfigEncryptionPassword(),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -997,6 +1311,88 @@ internal sealed class TerminalGuiRunner
         dialog.Dispose();
     }
 
+    private void ShowUserEntriesDialog(ServerConfig server, string databaseName, IReadOnlyList<DatabaseUserRow> rows)
+    {
+        var items = rows
+            .Select(row => $"{row.UserName} | {row.LoginName} | {row.Roles}")
+            .ToList();
+        var listView = CreateListView(items, 0);
+        var selection = ShowListDialog($"Users in {databaseName}", listView, "View");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var row = rows[Math.Clamp(listView.SelectedItem ?? 0, 0, rows.Count - 1)];
+        ShowUserEntryDialog(server, databaseName, row);
+    }
+
+    private void ShowUserEntryDialog(ServerConfig server, string databaseName, DatabaseUserRow row)
+    {
+        var trackedUser = server.Databases
+            .FirstOrDefault(database => database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))?
+            .Users
+            .FirstOrDefault(user => user.Username.Equals(row.UserName, StringComparison.OrdinalIgnoreCase));
+        var details = string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {databaseName}",
+            $"User: {row.UserName}",
+            $"Login: {row.LoginName}",
+            $"Roles: {row.Roles}",
+            $"Password State: {BuildPasswordState(trackedUser?.Password, trackedUser?.Encrypted ?? false)}",
+            $"Connection String: {trackedUser?.ConnectionString ?? BuildConnectionStringPreview(server, databaseName, row.UserName)}"
+        ]);
+
+        var showPasswordButton = new Button { Text = "Show Password" };
+        var closeButton = new Button { Text = "Close" };
+        var dialog = new Dialog
+        {
+            Title = $"User Entry: {row.UserName}",
+            Width = 96,
+            Height = 18,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        var textView = new TextView
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(1),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = details,
+            TabStop = TabBehavior.TabStop
+        };
+        dialog.Add(textView);
+        dialog.Buttons = [showPasswordButton, closeButton];
+
+        showPasswordButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            if (trackedUser is null || string.IsNullOrWhiteSpace(trackedUser.Password))
+            {
+                MessageBox.ErrorQuery(RequireApp(), "Show Password", "Password is not available in the current config view.", "OK");
+                return;
+            }
+
+            MessageBox.Query(RequireApp(), $"Password: {row.UserName}", trackedUser.Password, "OK");
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+
+        textView.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
+    }
+
+    private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
+        => $"{(SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer ? "Server" : "Host")}={server.ServerName};Database={databaseName};User={userName};Password=<PASSWORD_REQUIRED>;";
+
     private string? PromptDatabaseName(ServerConfig server, string title)
     {
         var databaseNames = server.Databases
@@ -1121,6 +1517,7 @@ internal sealed class TerminalGuiRunner
                         {
                             Command = CommandKind.SelectServer,
                             ConfigPath = _configPath,
+                            EncryptionPassword = GetConfigEncryptionPassword(),
                             ServerName = newActiveServer
                         }, _cancellationToken),
                         "Select Server",
@@ -1288,6 +1685,9 @@ internal sealed class TerminalGuiRunner
     private ServerConfig? GetActiveServerConfig()
         => _config.Servers.FirstOrDefault(server => server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase));
 
+    private string? GetConfigEncryptionPassword()
+        => _configEncryptionPassword.Reveal();
+
     private IApplication RequireApp()
         => _app ?? throw new InvalidOperationException("Terminal.Gui application is not initialized.");
 
@@ -1303,9 +1703,19 @@ internal sealed class TerminalGuiRunner
 
     private static string BuildServerLine(ServerConfig server)
     {
-        var passwordState = string.IsNullOrWhiteSpace(server.AdminPassword) ? "missing" : "saved";
+        var passwordState = BuildPasswordState(server.AdminPassword, server.Encrypted);
         var userCount = server.Databases.Sum(database => database.Users.Count);
         return $"{server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)} | password: {passwordState} | dbs: {server.Databases.Count} | users: {userCount}";
+    }
+
+    private static string BuildPasswordState(string? password, bool encrypted)
+    {
+        if (encrypted)
+        {
+            return "encrypted";
+        }
+
+        return string.IsNullOrWhiteSpace(password) ? "missing" : "saved";
     }
 
     private static ListView CreateListView(IReadOnlyList<string> items, int selectedIndex)
@@ -1430,6 +1840,22 @@ internal sealed class TerminalGuiRunner
         }
 
         return value;
+    }
+
+    private static int? ParseOptionalPort(TextField field)
+    {
+        var text = GetText(field);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(text, out var port) || port <= 0)
+        {
+            throw new UserInputException("Port must be a positive integer.");
+        }
+
+        return port;
     }
 
     private static bool HasStoredAdminCredentials(ServerConfig server)

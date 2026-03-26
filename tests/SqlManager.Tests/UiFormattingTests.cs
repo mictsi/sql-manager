@@ -80,6 +80,28 @@ public sealed class UiFormattingTests
             line);
     }
 
+    [Fact]
+    public void BuildServerLine_ReportsEncryptedPasswordState()
+    {
+        var server = new ServerConfig
+        {
+            ServerName = "sql01.contoso.local",
+            Provider = SqlProviders.SqlServer,
+            AdminUsername = "sa",
+            AdminPassword = "smenc:v1:placeholder",
+            Encrypted = true
+        };
+
+        var line = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildServerLine",
+            server);
+
+        Assert.Equal(
+            "sql01.contoso.local | provider: SQL Server | admin: sa | password: encrypted | dbs: 0 | users: 0",
+            line);
+    }
+
     private static T InvokePrivateStatic<T>(Type type, string methodName, params object?[] arguments)
     {
         var method = type.GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static);

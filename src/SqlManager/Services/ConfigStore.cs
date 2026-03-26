@@ -51,6 +51,8 @@ internal sealed class ConfigStore
         var config = new SqlManagerConfig
         {
             SelectedServerName = root["selectedServerName"]?.GetValue<string>() ?? string.Empty,
+            EncryptPasswords = root["encryptPasswords"]?.GetValue<bool>() ?? false,
+            EncryptionKey = root["encryptionKey"]?.GetValue<string>() ?? string.Empty,
             Timeouts = new SqlTimeoutConfig
             {
                 ConnectionTimeoutSeconds = root["timeouts"]?["connectionTimeoutSeconds"]?.GetValue<int>() ?? SqlTimeoutConfig.DefaultConnectionTimeoutSeconds,
@@ -72,7 +74,8 @@ internal sealed class ConfigStore
                 Port = serverNode["port"]?.GetValue<int?>(),
                 AdminDatabase = serverNode["adminDatabase"]?.GetValue<string>() ?? string.Empty,
                 AdminUsername = serverNode["adminUsername"]?.GetValue<string>() ?? string.Empty,
-                AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty
+                AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty,
+                Encrypted = serverNode["encrypted"]?.GetValue<bool>() ?? false
             };
 
             foreach (var databaseNode in serverNode["databases"]?.AsArray() ?? [])
@@ -98,6 +101,7 @@ internal sealed class ConfigStore
                     {
                         Username = userNode["username"]?.GetValue<string>() ?? string.Empty,
                         Password = userNode["password"]?.GetValue<string>() ?? string.Empty,
+                        Encrypted = userNode["encrypted"]?.GetValue<bool>() ?? false,
                         ConnectionString = userNode["connectionString"]?.GetValue<string>() ?? string.Empty,
                         Roles = userNode["roles"]?.AsArray().Select(role => role?.GetValue<string>() ?? string.Empty).Where(role => !string.IsNullOrWhiteSpace(role)).ToList() ?? []
                     });
@@ -210,6 +214,7 @@ internal sealed class ConfigStore
     private static void Normalize(SqlManagerConfig config)
     {
         config.SelectedServerName ??= string.Empty;
+        config.EncryptionKey ??= string.Empty;
         config.Timeouts ??= new SqlTimeoutConfig();
         if (config.Timeouts.ConnectionTimeoutSeconds <= 0)
         {
@@ -235,6 +240,7 @@ internal sealed class ConfigStore
             server.AdminDatabase ??= string.Empty;
             server.AdminUsername ??= string.Empty;
             server.AdminPassword ??= string.Empty;
+            server.Encrypted = config.EncryptPasswords && server.Encrypted && !string.IsNullOrWhiteSpace(server.AdminPassword);
             server.Databases ??= [];
 
             foreach (var database in server.Databases)
@@ -246,10 +252,16 @@ internal sealed class ConfigStore
                 {
                     user.Username ??= string.Empty;
                     user.Password ??= string.Empty;
+                    user.Encrypted = config.EncryptPasswords && user.Encrypted && !string.IsNullOrWhiteSpace(user.Password);
                     user.ConnectionString ??= string.Empty;
                     user.Roles ??= [];
                 }
             }
+        }
+
+        if (!config.EncryptPasswords)
+        {
+            config.EncryptionKey = string.Empty;
         }
     }
 }

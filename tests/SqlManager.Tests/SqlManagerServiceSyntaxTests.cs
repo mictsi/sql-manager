@@ -17,7 +17,7 @@ public sealed class SqlManagerServiceSyntaxTests
             "Secret123!");
 
         Assert.Equal(
-            "Server=sql01.contoso.local,1433;Database=LabDb;User ID=app_user;Password=Secret123!;Encrypt=True;TrustServerCertificate=True;",
+            "Server=sql01.contoso.local,1433;Database=LabDb;User ID=app_user;Password=********;Encrypt=True;TrustServerCertificate=True;",
             connectionString);
     }
 
@@ -34,7 +34,7 @@ public sealed class SqlManagerServiceSyntaxTests
             "Secret123!");
 
         Assert.Equal(
-            "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_user;Password=Secret123!;Ssl Mode=Require;",
+            "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_user;Password=********;Ssl Mode=Require;",
             connectionString);
     }
 

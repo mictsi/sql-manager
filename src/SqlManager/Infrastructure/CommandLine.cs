@@ -20,7 +20,9 @@ internal enum CommandKind
     RemoveRole,
     ShowUsers,
     RemoveUser,
-    UpdatePassword
+    UpdatePassword,
+    EnableConfigEncryption,
+    DisableConfigEncryption
 }
 
 internal enum RemovalScope
@@ -48,6 +50,7 @@ internal sealed class CommandOptions
     public IReadOnlyList<string> Roles { get; set; } = Array.Empty<string>();
     public IReadOnlyList<DatabaseRoleAssignment> DatabaseRoleAssignments { get; set; } = Array.Empty<DatabaseRoleAssignment>();
     public string? NewUserPassword { get; set; }
+    public string? EncryptionPassword { get; set; }
     public RemovalScope RemovalScope { get; set; } = RemovalScope.Both;
     public bool RemoveServerLogin { get; set; }
     public bool NonInteractive { get; set; }
@@ -138,6 +141,7 @@ internal static class CommandLineParser
                     UserName = GetSingleOrDefault(optionMap, null, "username", "user"),
                     Roles = roles,
                     NewUserPassword = GetSingleOrDefault(optionMap, null, "newuserpassword", "userpassword"),
+                    EncryptionPassword = GetSingleOrDefault(optionMap, null, "encryptionpassword", "configpassword", "unlockpassword"),
                     RemovalScope = removalScope,
                     RemoveServerLogin = optionMap.ContainsKey("removeserverlogin"),
                     NonInteractive = optionMap.ContainsKey("noninteractive")
@@ -217,6 +221,8 @@ internal static class CommandLineParser
             "showusers" => CommandKind.ShowUsers,
             "removeuser" => CommandKind.RemoveUser,
             "updatepassword" => CommandKind.UpdatePassword,
+            "enableconfigencryption" or "encryptconfig" => CommandKind.EnableConfigEncryption,
+            "disableconfigencryption" or "decryptconfig" => CommandKind.DisableConfigEncryption,
             _ => null
         };
     }

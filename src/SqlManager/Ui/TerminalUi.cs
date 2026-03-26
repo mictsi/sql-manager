@@ -94,11 +94,13 @@ internal sealed class TerminalUi
     {
         var totalDatabases = config.Servers.Sum(server => server.Databases.Count);
         var totalUsers = config.Servers.Sum(server => server.Databases.Sum(database => database.Users.Count));
+        var protectionState = config.EncryptPasswords ? "encrypted" : "plaintext";
         var grid = new Grid();
         grid.AddColumn();
         grid.AddColumn();
         grid.AddRow("Config Path", configPath);
         grid.AddRow("Selected Server", string.IsNullOrWhiteSpace(config.SelectedServerName) ? "<none>" : config.SelectedServerName);
+        grid.AddRow("Password Storage", protectionState);
         grid.AddRow("Configured Servers", config.Servers.Count.ToString());
         grid.AddRow("Tracked Databases", totalDatabases.ToString());
         grid.AddRow("Tracked Users", totalUsers.ToString());
@@ -350,10 +352,13 @@ internal sealed class TerminalUi
         WritePlainLine("  sql-manager show-users --database-name <database> --admin-password <password>");
         WritePlainLine("  sql-manager remove-user --user-name <user> --database-name <database> [--database-name <database>] [--remove-server-login] --removal-scope Database|Server|Both --admin-password <password>");
         WritePlainLine("  sql-manager update-password --user-name <user> --admin-password <password> [--new-user-password <password>]");
+        WritePlainLine("  sql-manager enable-config-encryption --config-path <path> [--encryption-password <password>]");
+        WritePlainLine("  sql-manager disable-config-encryption --config-path <path> [--encryption-password <password>]");
         WritePlainLine("  sql-manager help");
         _console.MarkupLine($"[grey]Default config path: {Markup.Escape(defaultConfigPath)}[/]");
         _console.MarkupLine("[grey]PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.[/]");
         _console.MarkupLine("[grey]Generic roles are translated per provider: db_owner, db_datareader, db_datawriter.[/]");
+        _console.MarkupLine("[grey]Encrypted configs can be unlocked for CLI operations with --encryption-password <password>.[/]");
     }
 
     private static void WritePlainLine(string text)

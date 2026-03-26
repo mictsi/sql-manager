@@ -10,29 +10,65 @@ internal sealed class SqlManagerService
 {
     private static readonly string[] SupportedRoles = ["db_owner", "db_datareader", "db_datawriter"];
     private readonly ConfigStore _configStore;
+    private readonly ConfigPasswordProtector _configPasswordProtector;
     private readonly PasswordGenerator _passwordGenerator;
     private readonly SqlServerGateway _sqlServerGateway;
     private readonly PostgreSqlGateway _postgreSqlGateway;
 
-    public SqlManagerService(ConfigStore configStore, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway, PostgreSqlGateway postgreSqlGateway)
+    public SqlManagerService(ConfigStore configStore, ConfigPasswordProtector configPasswordProtector, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway, PostgreSqlGateway postgreSqlGateway)
     {
         _configStore = configStore;
+        _configPasswordProtector = configPasswordProtector;
         _passwordGenerator = passwordGenerator;
         _sqlServerGateway = sqlServerGateway;
         _postgreSqlGateway = postgreSqlGateway;
     }
 
     public Task<OperationResult<SqlManagerConfig>> LoadConfigSummaryAsync(string configPath, CancellationToken cancellationToken)
+        => LoadConfigSummaryAsync(configPath, null, cancellationToken);
+
+    public Task<OperationResult<SqlManagerConfig>> LoadConfigSummaryAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
-            var config = await _configStore.LoadAsync(configPath, cancellationToken);
+            var config = await LoadDisplayConfigAsync(configPath, encryptionPassword, cancellationToken);
             return OperationResult<SqlManagerConfig>.Success(config, "Config loaded.");
+        });
+
+    public Task<OperationResult> ConfigurePasswordEncryptionAsync(string configPath, bool encryptPasswords, string encryptionPassword, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var storedConfig = await _configStore.LoadAsync(configPath, cancellationToken);
+            if (encryptPasswords)
+            {
+                _configPasswordProtector.ValidateUnlockPassword(encryptionPassword);
+                if (storedConfig.EncryptPasswords)
+                {
+                    throw new UserInputException("Password encryption is already enabled for this config.");
+                }
+
+                var config = CloneConfig(storedConfig);
+                config.EncryptPasswords = true;
+                config.EncryptionKey = _configPasswordProtector.CreateEncryptionKey(encryptionPassword);
+                await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
+                return OperationResult.Success("Password encryption enabled.", "Stored admin and user passwords are now encrypted at rest.");
+            }
+
+            if (!storedConfig.EncryptPasswords)
+            {
+                return OperationResult.Success("Password encryption is already disabled.");
+            }
+
+            var decryptedConfig = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            decryptedConfig.EncryptPasswords = false;
+            decryptedConfig.EncryptionKey = string.Empty;
+            await SaveEditableConfigAsync(configPath, decryptedConfig, null, cancellationToken);
+            return OperationResult.Success("Password encryption disabled.", "Stored passwords are now written in plaintext again.");
         });
 
     public Task<OperationResult> InitializeConfigAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
-            var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
+            var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
             if (!string.IsNullOrWhiteSpace(options.ServerName))
             {
                 var server = GetOrCreateServer(config, options.ServerName!, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
@@ -41,7 +77,7 @@ internal sealed class SqlManagerService
                 config.SelectedServerName = options.ServerName!;
             }
 
-            await _configStore.SaveAsync(options.ConfigPath, config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
             return OperationResult.Success($"Config file is ready at '{options.ConfigPath}'.");
         });
 
@@ -49,29 +85,77 @@ internal sealed class SqlManagerService
         => ExecuteAsync(async () =>
         {
             var serverName = Require(options.ServerName, "AddServer requires ServerName.");
-            var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
+            var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
             GetOrCreateServer(config, serverName, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
             if (string.IsNullOrWhiteSpace(config.SelectedServerName))
             {
                 config.SelectedServerName = serverName;
             }
 
-            await _configStore.SaveAsync(options.ConfigPath, config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
             return OperationResult.Success($"Server '{serverName}' has been added to the config.");
+        });
+
+    public Task<OperationResult> UpdateServerAsync(
+        string configPath,
+        string existingServerName,
+        string serverName,
+        string? provider,
+        int? port,
+        string? adminDatabase,
+        string adminUsername,
+        string? adminPassword,
+        string? encryptionPassword,
+        CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var currentName = Require(existingServerName, "UpdateServer requires an existing server name.");
+            var newServerName = Require(serverName, "UpdateServer requires ServerName.");
+            var newAdminUsername = Require(adminUsername, "UpdateServer requires AdminUsername.");
+            var config = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            var server = FindServer(config, currentName)
+                ?? throw new UserInputException($"Server '{currentName}' was not found in the config.");
+
+            if (!currentName.Equals(newServerName, StringComparison.OrdinalIgnoreCase)
+                && FindServer(config, newServerName) is not null)
+            {
+                throw new UserInputException($"Server '{newServerName}' already exists in the config.");
+            }
+
+            var normalizedProvider = SqlProviders.Normalize(string.IsNullOrWhiteSpace(provider) ? server.Provider : provider);
+            var normalizedAdminDatabase = string.IsNullOrWhiteSpace(adminDatabase)
+                ? SqlProviders.GetDefaultAdminDatabase(normalizedProvider)
+                : adminDatabase!;
+
+            server.ServerName = newServerName;
+            server.Provider = normalizedProvider;
+            server.Port = port;
+            server.AdminDatabase = normalizedAdminDatabase;
+            server.AdminUsername = newAdminUsername;
+            server.AdminPassword = adminPassword ?? string.Empty;
+            RefreshConnectionStrings(server);
+
+            if (config.SelectedServerName.Equals(currentName, StringComparison.OrdinalIgnoreCase))
+            {
+                config.SelectedServerName = newServerName;
+            }
+
+            await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
+            return OperationResult.Success($"Server '{currentName}' was updated.");
         });
 
     public Task<OperationResult> SelectServerAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
             var serverName = Require(options.ServerName, "SelectServer requires ServerName.");
-            var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
+            var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
             if (FindServer(config, serverName) is null)
             {
                 throw new UserInputException($"Server '{serverName}' was not found in the config.");
             }
 
             config.SelectedServerName = serverName;
-            await _configStore.SaveAsync(options.ConfigPath, config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
             return OperationResult.Success($"Selected server '{serverName}'.");
         });
 
@@ -113,7 +197,7 @@ internal sealed class SqlManagerService
             serverConfig.AdminUsername = context.AdminUsername;
             serverConfig.AdminPassword = context.AdminPassword;
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
                 $"Synchronized {databaseNames.Count} database(s) and {userCount} user record(s) from '{context.ServerName}'.");
@@ -172,7 +256,7 @@ END
             var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             GetOrCreateDatabase(serverConfig, databaseName);
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Database '{databaseName}' is ready on '{context.ServerName}'.");
         });
@@ -216,7 +300,7 @@ END
                 .Where(database => !database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))
                 .ToList();
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Removed database '{databaseName}' from '{context.ServerName}'.");
         });
@@ -256,7 +340,7 @@ END
             userConfig.Roles = roles.ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, resolvedPassword.Password);
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
                 $"SQL user '{userName}' is ready for database '{databaseName}'.",
@@ -345,7 +429,7 @@ END
             }
 
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             var assignmentSummary = string.Join(", ",
                 assignments.Select(assignment => $"{assignment.DatabaseName}=[{(assignment.Roles.Count == 0 ? "no access" : string.Join('/', assignment.Roles))}]")
@@ -379,7 +463,7 @@ END
             userConfig.Roles = userConfig.Roles.Concat(roles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Added role(s) '{string.Join(", ", roles)}' to '{userName}' on '{databaseName}'.");
         });
@@ -406,7 +490,7 @@ END
             userConfig.Roles = userConfig.Roles.Except(roles, StringComparer.OrdinalIgnoreCase).ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Removed role(s) '{string.Join(", ", roles)}' from '{userName}' on '{databaseName}'.");
         });
@@ -455,7 +539,7 @@ END
             }
 
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             var scopeMessage = removeServerLogin
                 ? $"Removed '{userName}' from selected databases and dropped the server login."
@@ -492,7 +576,7 @@ END
 
             UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), context.Provider, context.ServerName, context.Port, userName, newPassword);
             context.Config.SelectedServerName = context.ServerName;
-            await _configStore.SaveAsync(options.ConfigPath, context.Config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
                 $"Password updated for '{userName}'.",
@@ -503,7 +587,7 @@ END
 
     private async Task<ResolvedServerContext> ResolveServerContextAsync(CommandOptions options, bool persistSelection, CancellationToken cancellationToken)
     {
-        var config = await _configStore.LoadAsync(options.ConfigPath, cancellationToken);
+        var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
         var serverName = options.ServerName;
         if (string.IsNullOrWhiteSpace(serverName))
         {
@@ -555,10 +639,223 @@ END
                 }
             }
 
-            await _configStore.SaveAsync(options.ConfigPath, config, cancellationToken);
+            await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
         }
 
         return new ResolvedServerContext(config, serverConfig, serverName, provider, port, adminDatabase!, adminUsername, adminPassword ?? string.Empty, config.Timeouts);
+    }
+
+    private async Task<SqlManagerConfig> LoadDisplayConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
+    {
+        var storedConfig = await _configStore.LoadAsync(configPath, cancellationToken);
+        return PrepareConfigForUse(storedConfig, encryptionPassword, requireUnlock: false);
+    }
+
+    private async Task<SqlManagerConfig> LoadEditableConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
+    {
+        var storedConfig = await _configStore.LoadAsync(configPath, cancellationToken);
+        return PrepareConfigForUse(storedConfig, encryptionPassword, requireUnlock: storedConfig.EncryptPasswords);
+    }
+
+    private async Task SaveEditableConfigAsync(string configPath, SqlManagerConfig config, string? encryptionPassword, CancellationToken cancellationToken)
+    {
+        var configToPersist = CloneConfig(config);
+        if (!configToPersist.EncryptPasswords)
+        {
+            configToPersist.EncryptionKey = string.Empty;
+            MarkPlaintextSecrets(configToPersist);
+            RefreshConnectionStrings(configToPersist);
+            await _configStore.SaveAsync(configPath, configToPersist, cancellationToken);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(encryptionPassword))
+        {
+            throw new UserInputException("Config passwords are encrypted. Supply EncryptionPassword or unlock password encryption from the Configuration menu.");
+        }
+
+        if (string.IsNullOrWhiteSpace(configToPersist.EncryptionKey))
+        {
+            configToPersist.EncryptionKey = _configPasswordProtector.CreateEncryptionKey(encryptionPassword!);
+        }
+        else if (!_configPasswordProtector.VerifyUnlockPassword(encryptionPassword!, configToPersist.EncryptionKey))
+        {
+            throw new UserInputException("Encryption password is invalid.");
+        }
+
+        EncryptSecrets(configToPersist, encryptionPassword!);
+        RefreshConnectionStrings(configToPersist);
+        await _configStore.SaveAsync(configPath, configToPersist, cancellationToken);
+    }
+
+    private SqlManagerConfig PrepareConfigForUse(SqlManagerConfig storedConfig, string? encryptionPassword, bool requireUnlock)
+    {
+        var workingConfig = CloneConfig(storedConfig);
+        if (!workingConfig.EncryptPasswords)
+        {
+            MarkPlaintextSecrets(workingConfig);
+            RefreshConnectionStrings(workingConfig);
+            return workingConfig;
+        }
+
+        if (string.IsNullOrWhiteSpace(workingConfig.EncryptionKey))
+        {
+            throw new UserInputException("Config password encryption is enabled, but no encryption metadata was found.");
+        }
+
+        if (string.IsNullOrWhiteSpace(encryptionPassword))
+        {
+            if (requireUnlock)
+            {
+                throw new UserInputException("Config passwords are encrypted. Supply EncryptionPassword or unlock password encryption from the Configuration menu.");
+            }
+
+            return BuildLockedConfigView(workingConfig);
+        }
+
+        if (!_configPasswordProtector.VerifyUnlockPassword(encryptionPassword!, workingConfig.EncryptionKey))
+        {
+            throw new UserInputException("Encryption password is invalid.");
+        }
+
+        DecryptSecrets(workingConfig, encryptionPassword!);
+        RefreshConnectionStrings(workingConfig);
+        return workingConfig;
+    }
+
+    private static SqlManagerConfig CloneConfig(SqlManagerConfig source)
+        => new()
+        {
+            SelectedServerName = source.SelectedServerName,
+            EncryptPasswords = source.EncryptPasswords,
+            EncryptionKey = source.EncryptionKey,
+            Timeouts = new SqlTimeoutConfig
+            {
+                ConnectionTimeoutSeconds = source.Timeouts.ConnectionTimeoutSeconds,
+                CommandTimeoutSeconds = source.Timeouts.CommandTimeoutSeconds
+            },
+            Servers = source.Servers.Select(server => new ServerConfig
+            {
+                ServerName = server.ServerName,
+                Provider = server.Provider,
+                Port = server.Port,
+                AdminDatabase = server.AdminDatabase,
+                AdminUsername = server.AdminUsername,
+                AdminPassword = server.AdminPassword,
+                Encrypted = server.Encrypted,
+                Databases = server.Databases.Select(database => new DatabaseConfig
+                {
+                    DatabaseName = database.DatabaseName,
+                    Users = database.Users.Select(user => new UserConfig
+                    {
+                        Username = user.Username,
+                        Password = user.Password,
+                        Encrypted = user.Encrypted,
+                        Roles = user.Roles.ToList(),
+                        ConnectionString = user.ConnectionString
+                    }).ToList()
+                }).ToList()
+            }).ToList()
+        };
+
+    private SqlManagerConfig BuildLockedConfigView(SqlManagerConfig config)
+    {
+        foreach (var server in config.Servers)
+        {
+            if (server.Encrypted)
+            {
+                server.AdminPassword = string.Empty;
+            }
+
+            foreach (var user in server.Databases.SelectMany(database => database.Users))
+            {
+                if (user.Encrypted)
+                {
+                    user.Password = string.Empty;
+                }
+            }
+        }
+
+        return config;
+    }
+
+    private void DecryptSecrets(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var server in config.Servers)
+        {
+            if (server.Encrypted && !string.IsNullOrWhiteSpace(server.AdminPassword))
+            {
+                server.AdminPassword = _configPasswordProtector.DecryptSecret(server.AdminPassword, encryptionPassword);
+            }
+
+            foreach (var user in server.Databases.SelectMany(database => database.Users))
+            {
+                if (user.Encrypted && !string.IsNullOrWhiteSpace(user.Password))
+                {
+                    user.Password = _configPasswordProtector.DecryptSecret(user.Password, encryptionPassword);
+                }
+            }
+        }
+    }
+
+    private void EncryptSecrets(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var server in config.Servers)
+        {
+            if (string.IsNullOrWhiteSpace(server.AdminPassword))
+            {
+                server.Encrypted = false;
+            }
+            else
+            {
+                server.AdminPassword = _configPasswordProtector.EncryptSecret(server.AdminPassword, encryptionPassword);
+                server.Encrypted = true;
+            }
+
+            foreach (var user in server.Databases.SelectMany(database => database.Users))
+            {
+                if (string.IsNullOrWhiteSpace(user.Password))
+                {
+                    user.Encrypted = false;
+                }
+                else
+                {
+                    user.Password = _configPasswordProtector.EncryptSecret(user.Password, encryptionPassword);
+                    user.Encrypted = true;
+                }
+            }
+        }
+    }
+
+    private static void MarkPlaintextSecrets(SqlManagerConfig config)
+    {
+        foreach (var server in config.Servers)
+        {
+            server.Encrypted = false;
+            foreach (var user in server.Databases.SelectMany(database => database.Users))
+            {
+                user.Encrypted = false;
+            }
+        }
+    }
+
+    private static void RefreshConnectionStrings(SqlManagerConfig config)
+    {
+        foreach (var server in config.Servers)
+        {
+            RefreshConnectionStrings(server);
+        }
+    }
+
+    private static void RefreshConnectionStrings(ServerConfig server)
+    {
+        foreach (var database in server.Databases)
+        {
+            foreach (var user in database.Users)
+            {
+                user.ConnectionString = BuildConnectionString(server.Provider, server.ServerName, server.Port, database.DatabaseName, user.Username, user.Password);
+            }
+        }
     }
 
     private static string SelectConfiguredServerName(SqlManagerConfig config)
@@ -1146,7 +1443,7 @@ ORDER BY member.rolname;
 
     private static string BuildConnectionString(string provider, string server, int? port, string database, string username, string? password)
     {
-        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : password;
+        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
         if (IsSqlServer(provider))
         {
             var dataSource = port is > 0 ? $"{server},{port.Value}" : server;

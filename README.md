@@ -35,6 +35,8 @@ Install-Module -Name SqlServer
 ```json
 {
   "selectedServerName": "pg01.contoso.local",
+  "encryptPasswords": false,
+  "encryptionKey": "",
   "timeouts": {
     "connectionTimeoutSeconds": 15,
     "commandTimeoutSeconds": 30
@@ -46,6 +48,7 @@ Install-Module -Name SqlServer
       "adminDatabase": "master",
       "adminUsername": "sa",
       "adminPassword": "ServerAdminSecret123!",
+      "encrypted": false,
       "databases": [
         {
           "databaseName": "LabDB",
@@ -53,8 +56,9 @@ Install-Module -Name SqlServer
             {
               "username": "LabDBUser",
               "password": "stored-password",
+              "encrypted": false,
               "roles": ["db_owner", "db_datareader"],
-              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=LabDBUser;Password=stored-password;Encrypt=True;TrustServerCertificate=True;"
+              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=LabDBUser;Password=********;Encrypt=True;TrustServerCertificate=True;"
             }
           ]
         }
@@ -67,6 +71,7 @@ Install-Module -Name SqlServer
       "adminDatabase": "postgres",
       "adminUsername": "postgres",
       "adminPassword": "PostgresAdminSecret123!",
+      "encrypted": false,
       "databases": [
         {
           "databaseName": "appdb",
@@ -74,8 +79,9 @@ Install-Module -Name SqlServer
             {
               "username": "app_reader",
               "password": "stored-password",
+              "encrypted": false,
               "roles": ["db_datareader"],
-              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_reader;Password=stored-password;Ssl Mode=Require;"
+              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_reader;Password=********;Ssl Mode=Require;"
             }
           ]
         }
@@ -90,8 +96,13 @@ Provider-aware config notes:
 - `provider` supports `sqlserver` and `postgresql`.
 - `port` is optional. If omitted, the server provider default is used.
 - `adminDatabase` defaults to `master` for SQL Server and `postgres` for PostgreSQL.
+- `encryptPasswords` controls whether stored passwords are written encrypted at rest.
+- `encryptionKey` stores the password-verifier metadata used to validate the unlock password before decrypting secrets.
+- `encrypted` on server and user entries shows whether the persisted password value is encrypted.
 - The CLI keeps generic role names in config: `db_owner`, `db_datareader`, and `db_datawriter`.
 - SQL syntax is generated per provider at runtime. SQL Server uses native database roles. PostgreSQL uses provider-specific role and grant statements behind the same generic config roles.
+
+When password encryption is enabled from the Configuration menu or the dedicated CLI commands, the app derives the encryption key from the unlock password with Argon2id, encrypts stored admin and user passwords with AES-256-GCM, and keeps connection strings masked with `Password=********` at rest. Existing PBKDF2-based encrypted configs remain readable.
 
 ## Examples
 
@@ -121,6 +132,18 @@ Show help:
 
 ```powershell
 .\src\SqlManager\bin\Debug\net10.0\sql-manager.exe help
+```
+
+Enable config encryption from the CLI:
+
+```powershell
+.\src\SqlManager\bin\Debug\net10.0\sql-manager.exe enable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
+```
+
+Disable config encryption from the CLI:
+
+```powershell
+.\src\SqlManager\bin\Debug\net10.0\sql-manager.exe disable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
 ```
 
 Create a database with the .NET CLI:

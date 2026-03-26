@@ -134,7 +134,7 @@ internal sealed class SqlManagerApplication
         {
             case CommandKind.ViewConfig:
             {
-                var summary = await _service.LoadConfigSummaryAsync(options.ConfigPath, cancellationToken);
+                var summary = await _service.LoadConfigSummaryAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
                 if (summary.Succeeded && summary.Value is not null)
                 {
                     _ui.RenderConfigSummary(summary.Value, options.ConfigPath);
@@ -190,6 +190,10 @@ internal sealed class SqlManagerApplication
                 return await RenderSimpleResultAsync(_service.RemoveUserAsync(options, cancellationToken));
             case CommandKind.UpdatePassword:
                 return await RenderSimpleResultAsync(_service.UpdatePasswordAsync(options, cancellationToken));
+            case CommandKind.EnableConfigEncryption:
+                return await RenderSimpleResultAsync(_service.ConfigurePasswordEncryptionAsync(options.ConfigPath, true, RequireEncryptionPassword(options), cancellationToken));
+            case CommandKind.DisableConfigEncryption:
+                return await RenderSimpleResultAsync(_service.ConfigurePasswordEncryptionAsync(options.ConfigPath, false, RequireEncryptionPassword(options), cancellationToken));
             default:
                 _ui.WriteError("Unsupported command.");
                 return 2;
@@ -208,6 +212,23 @@ internal sealed class SqlManagerApplication
         if (options.NonInteractive || !_ui.CanPromptInteractively)
         {
             return;
+        }
+
+        var summary = await _service.LoadConfigSummaryAsync(options.ConfigPath, cancellationToken);
+        var needsEncryptionPassword = summary.Succeeded
+            && summary.Value is not null
+            && summary.Value.EncryptPasswords
+            && string.IsNullOrWhiteSpace(options.EncryptionPassword)
+            && options.Command is not CommandKind.Help and not CommandKind.Version and not CommandKind.Tui and not CommandKind.ViewConfig and not CommandKind.ShowDatabases and not CommandKind.ShowUsers and not CommandKind.EnableConfigEncryption;
+
+        if (needsEncryptionPassword)
+        {
+            options.EncryptionPassword = _ui.PromptSecret("Config encryption password:");
+        }
+
+        if (options.Command == CommandKind.EnableConfigEncryption && string.IsNullOrWhiteSpace(options.EncryptionPassword))
+        {
+            options.EncryptionPassword = _ui.PromptSecret("New config encryption password:");
         }
 
         var needsAdminPassword = options.Command is CommandKind.SyncServer
@@ -237,12 +258,12 @@ internal sealed class SqlManagerApplication
 
     private async Task TryHydrateStoredAdminCredentialsAsync(CommandOptions options, CancellationToken cancellationToken)
     {
-        if (options.Command is CommandKind.Help or CommandKind.Tui or CommandKind.ViewConfig or CommandKind.SelectServer)
+        if (options.Command is CommandKind.Help or CommandKind.Tui or CommandKind.ViewConfig or CommandKind.SelectServer or CommandKind.EnableConfigEncryption or CommandKind.DisableConfigEncryption)
         {
             return;
         }
 
-        var summary = await _service.LoadConfigSummaryAsync(options.ConfigPath, cancellationToken);
+        var summary = await _service.LoadConfigSummaryAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
         if (!summary.Succeeded || summary.Value is null)
         {
             return;
@@ -287,6 +308,11 @@ internal sealed class SqlManagerApplication
             options.AdminPassword = server.AdminPassword;
         }
     }
+
+    private static string RequireEncryptionPassword(CommandOptions options)
+        => string.IsNullOrWhiteSpace(options.EncryptionPassword)
+            ? throw new UserInputException("EncryptionPassword is required for this command.")
+            : options.EncryptionPassword!;
 
     private async Task<CommandOptions?> PromptForOptionsAsync(string action, string configPath, SqlManagerConfig config, string? activeServer, CancellationToken cancellationToken)
     {

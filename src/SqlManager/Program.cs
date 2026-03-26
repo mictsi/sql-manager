@@ -31,6 +31,7 @@ internal static class Program
             ui,
             new SqlManagerService(
                 new ConfigStore(),
+                new ConfigPasswordProtector(),
                 new PasswordGenerator(),
                 new SqlServerGateway(),
                 new PostgreSqlGateway()));

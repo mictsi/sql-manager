@@ -25,6 +25,8 @@ internal static class SqlProviders
 internal sealed class SqlManagerConfig
 {
     public string SelectedServerName { get; set; } = string.Empty;
+    public bool EncryptPasswords { get; set; }
+    public string EncryptionKey { get; set; } = string.Empty;
     public SqlTimeoutConfig Timeouts { get; set; } = new();
     public List<ServerConfig> Servers { get; set; } = [];
 }
@@ -46,6 +48,7 @@ internal sealed class ServerConfig
     public string AdminDatabase { get; set; } = string.Empty;
     public string AdminUsername { get; set; } = string.Empty;
     public string AdminPassword { get; set; } = string.Empty;
+    public bool Encrypted { get; set; }
     public List<DatabaseConfig> Databases { get; set; } = [];
 }
 
@@ -59,6 +62,7 @@ internal sealed class UserConfig
 {
     public string Username { get; set; } = string.Empty;
     public string Password { get; set; } = string.Empty;
+    public bool Encrypted { get; set; }
     public List<string> Roles { get; set; } = [];
     public string ConnectionString { get; set; } = string.Empty;
 }
