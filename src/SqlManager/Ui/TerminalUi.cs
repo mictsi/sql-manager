@@ -354,6 +354,7 @@ internal sealed class TerminalUi
         WritePlainLine("  sql-manager update-password --user-name <user> --admin-password <password> [--new-user-password <password>]");
         WritePlainLine("  sql-manager enable-config-encryption --config-path <path> [--encryption-password <password>]");
         WritePlainLine("  sql-manager disable-config-encryption --config-path <path> [--encryption-password <password>]");
+        WritePlainLine("  sql-manager migrate-config-encryption-format --config-path <path> [--encryption-password <password>]");
         WritePlainLine("  sql-manager help");
         _console.MarkupLine($"[grey]Default config path: {Markup.Escape(defaultConfigPath)}[/]");
         _console.MarkupLine("[grey]PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.[/]");

@@ -9,6 +9,9 @@ namespace SqlManager;
 internal sealed class SqlManagerService
 {
     private static readonly string[] SupportedRoles = ["db_owner", "db_datareader", "db_datawriter"];
+    private const string TrashEntryTypeServer = "server";
+    private const string TrashEntryTypeDatabase = "database";
+    private const string TrashEntryTypeUser = "user";
     private readonly ConfigStore _configStore;
     private readonly ConfigPasswordProtector _configPasswordProtector;
     private readonly PasswordGenerator _passwordGenerator;
@@ -43,14 +46,23 @@ internal sealed class SqlManagerService
                 _configPasswordProtector.ValidateUnlockPassword(encryptionPassword);
                 if (storedConfig.EncryptPasswords)
                 {
-                    throw new UserInputException("Password encryption is already enabled for this config.");
+                    if (HasFullConfigEnvelope(storedConfig))
+                    {
+                        throw new UserInputException("Password encryption is already enabled for this config.");
+                    }
+
+                    var migratedConfig = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+                    migratedConfig.EncryptPasswords = true;
+                    migratedConfig.EncryptionKey = storedConfig.EncryptionKey;
+                    await SaveEditableConfigAsync(configPath, migratedConfig, encryptionPassword, cancellationToken);
+                    return OperationResult.Success("Password encryption updated.", "The complete config file is now encrypted at rest.");
                 }
 
                 var config = CloneConfig(storedConfig);
                 config.EncryptPasswords = true;
                 config.EncryptionKey = _configPasswordProtector.CreateEncryptionKey(encryptionPassword);
                 await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
-                return OperationResult.Success("Password encryption enabled.", "Stored admin and user passwords are now encrypted at rest.");
+                return OperationResult.Success("Password encryption enabled.", "The complete config file is now encrypted at rest.");
             }
 
             if (!storedConfig.EncryptPasswords)
@@ -63,6 +75,97 @@ internal sealed class SqlManagerService
             decryptedConfig.EncryptionKey = string.Empty;
             await SaveEditableConfigAsync(configPath, decryptedConfig, null, cancellationToken);
             return OperationResult.Success("Password encryption disabled.", "Stored passwords are now written in plaintext again.");
+        });
+
+    public Task<OperationResult> MigrateEncryptedConfigFormatAsync(string configPath, string encryptionPassword, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var storedConfig = await _configStore.LoadAsync(configPath, cancellationToken);
+            if (!storedConfig.EncryptPasswords)
+            {
+                throw new UserInputException("Config encryption is not enabled for this file.");
+            }
+
+            if (HasFullConfigEnvelope(storedConfig))
+            {
+                return OperationResult.Success("Encrypted config format is already up to date.");
+            }
+
+            var migratedConfig = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            migratedConfig.EncryptPasswords = true;
+            migratedConfig.EncryptionKey = storedConfig.EncryptionKey;
+            await SaveEditableConfigAsync(configPath, migratedConfig, encryptionPassword, cancellationToken);
+            return OperationResult.Success("Encrypted config format migrated.", "The config now uses full-file encryption at rest.");
+        });
+
+    public Task<OperationResult> RestoreTrashItemAsync(string configPath, string trashId, string? encryptionPassword, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var requestedTrashId = Require(trashId, "RestoreTrashItem requires a trash item id.");
+            var config = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            var trashEntry = config.Trash.FirstOrDefault(entry => entry.TrashId.Equals(requestedTrashId, StringComparison.OrdinalIgnoreCase))
+                ?? throw new UserInputException("Trash item was not found.");
+
+            switch (trashEntry.EntryType)
+            {
+                case TrashEntryTypeServer:
+                {
+                    var server = DeserializeTrashPayload<ServerConfig>(trashEntry);
+                    if (FindServer(config, server.ServerName) is not null)
+                    {
+                        throw new UserInputException($"Server '{server.ServerName}' already exists in the config.");
+                    }
+
+                    AddVersion(server.VersionHistory, "Recovered from trash.", BuildServerVersionDetails(server));
+                    config.Servers.Add(server);
+                    if (string.IsNullOrWhiteSpace(config.SelectedServerName))
+                    {
+                        config.SelectedServerName = server.ServerName;
+                    }
+
+                    break;
+                }
+                case TrashEntryTypeDatabase:
+                {
+                    var database = DeserializeTrashPayload<DatabaseConfig>(trashEntry);
+                    var server = FindServer(config, trashEntry.ParentServerName)
+                        ?? throw new UserInputException($"Server '{trashEntry.ParentServerName}' must exist before this database can be restored.");
+                    if (server.Databases.Any(candidate => candidate.DatabaseName.Equals(database.DatabaseName, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new UserInputException($"Database '{database.DatabaseName}' already exists in the config.");
+                    }
+
+                    AddVersion(database.VersionHistory, "Recovered from trash.", BuildDatabaseVersionDetails(server, database));
+                    server.Databases.Add(database);
+                    break;
+                }
+                case TrashEntryTypeUser:
+                {
+                    var user = DeserializeTrashPayload<UserConfig>(trashEntry);
+                    var server = FindServer(config, trashEntry.ParentServerName)
+                        ?? throw new UserInputException($"Server '{trashEntry.ParentServerName}' must exist before this user can be restored.");
+                    var database = server.Databases.FirstOrDefault(candidate => candidate.DatabaseName.Equals(trashEntry.ParentDatabaseName, StringComparison.OrdinalIgnoreCase))
+                        ?? throw new UserInputException($"Database '{trashEntry.ParentDatabaseName}' must exist before this user can be restored.");
+                    if (database.Users.Any(candidate => candidate.Username.Equals(user.Username, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        throw new UserInputException($"User '{user.Username}' already exists in database '{database.DatabaseName}'.");
+                    }
+
+                    AddVersion(user.VersionHistory, "Recovered from trash.", BuildUserVersionDetails(server, database, user));
+                    database.Users.Add(user);
+                    break;
+                }
+                default:
+                    throw new UserInputException($"Unsupported trash entry type '{trashEntry.EntryType}'.");
+            }
+
+            config.Trash = config.Trash.Where(entry => !entry.TrashId.Equals(requestedTrashId, StringComparison.OrdinalIgnoreCase)).ToList();
+            await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
+
+            var restoreMessage = trashEntry.EntryType is TrashEntryTypeDatabase or TrashEntryTypeUser
+                ? "Entry restored to config. Sync or recreate the live SQL object if needed."
+                : "Entry restored from trash.";
+            return OperationResult.Success($"Restored '{trashEntry.DisplayName}' from trash.", restoreMessage);
         });
 
     public Task<OperationResult> InitializeConfigAsync(CommandOptions options, CancellationToken cancellationToken)
@@ -86,7 +189,9 @@ internal sealed class SqlManagerService
         {
             var serverName = Require(options.ServerName, "AddServer requires ServerName.");
             var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
-            GetOrCreateServer(config, serverName, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
+            var existingServer = FindServer(config, serverName);
+            var server = GetOrCreateServer(config, serverName, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
+            AddVersion(server.VersionHistory, existingServer is null ? "Server added." : "Server updated.", BuildServerVersionDetails(server));
             if (string.IsNullOrWhiteSpace(config.SelectedServerName))
             {
                 config.SelectedServerName = serverName;
@@ -134,6 +239,7 @@ internal sealed class SqlManagerService
             server.AdminUsername = newAdminUsername;
             server.AdminPassword = adminPassword ?? string.Empty;
             RefreshConnectionStrings(server);
+            AddVersion(server.VersionHistory, "Server updated.", BuildServerVersionDetails(server));
 
             if (config.SelectedServerName.Equals(currentName, StringComparison.OrdinalIgnoreCase))
             {
@@ -254,7 +360,8 @@ END
             }
 
             var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
-            GetOrCreateDatabase(serverConfig, databaseName);
+            var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
+            AddVersion(databaseConfig.VersionHistory, "Database added to config.", BuildDatabaseVersionDetails(serverConfig, databaseConfig));
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -296,9 +403,7 @@ END
             }
 
             var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
-            serverConfig.Databases = serverConfig.Databases
-                .Where(database => !database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
+            SoftDeleteDatabase(context.Config, serverConfig, databaseName, options.EncryptionPassword);
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -339,6 +444,7 @@ END
             userConfig.Password = resolvedPassword.Password;
             userConfig.Roles = roles.ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, resolvedPassword.Password);
+            AddVersion(userConfig.VersionHistory, "User created or updated.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -414,7 +520,7 @@ END
                 {
                     var dropUserQuery = BuildRemoveDatabaseUserQuery(context, assignment.DatabaseName, userName);
                     await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, assignment.DatabaseName, cancellationToken);
-                    RemoveUserFromConfigDatabases(serverConfig, userName, [assignment.DatabaseName]);
+                    SoftDeleteUsersFromConfigDatabases(context.Config, serverConfig, userName, [assignment.DatabaseName], options.EncryptionPassword);
                     continue;
                 }
 
@@ -426,6 +532,7 @@ END
                 userConfig.Password = passwordForConfig;
                 userConfig.Roles = assignment.Roles.ToList();
                 userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, assignment.DatabaseName, userName, passwordForConfig);
+                AddVersion(userConfig.VersionHistory, "User access updated.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
             }
 
             context.Config.SelectedServerName = context.ServerName;
@@ -462,6 +569,7 @@ END
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Concat(roles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
+            AddVersion(userConfig.VersionHistory, $"Roles added: {string.Join(", ", roles)}.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -489,6 +597,7 @@ END
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Except(roles, StringComparer.OrdinalIgnoreCase).ToList();
             userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
+            AddVersion(userConfig.VersionHistory, $"Roles removed: {string.Join(", ", roles)}.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -529,7 +638,7 @@ END
             var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             if (selectedDatabases.Count > 0)
             {
-                RemoveUserFromConfigDatabases(serverConfig, userName, selectedDatabases);
+                SoftDeleteUsersFromConfigDatabases(context.Config, serverConfig, userName, selectedDatabases, options.EncryptionPassword);
             }
 
             if (removeServerLogin)
@@ -575,6 +684,13 @@ END
             await EnsureServerLoginAsync(context, adminPassword, context.AdminDatabase, userName, newPassword, true, true, cancellationToken);
 
             UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), context.Provider, context.ServerName, context.Port, userName, newPassword);
+            foreach (var database in GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword).Databases)
+            {
+                foreach (var user in database.Users.Where(candidate => candidate.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)))
+                {
+                    AddVersion(user.VersionHistory, "Password updated.", BuildUserVersionDetails(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), database, user));
+                }
+            }
             context.Config.SelectedServerName = context.ServerName;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
@@ -663,8 +779,11 @@ END
         if (!configToPersist.EncryptPasswords)
         {
             configToPersist.EncryptionKey = string.Empty;
+            configToPersist.EncryptedPayload = string.Empty;
             MarkPlaintextSecrets(configToPersist);
             RefreshConnectionStrings(configToPersist);
+            ClearDatabasePayloads(configToPersist);
+            MarkPlaintextTrashPayloads(configToPersist);
             await _configStore.SaveAsync(configPath, configToPersist, cancellationToken);
             return;
         }
@@ -683,8 +802,15 @@ END
             throw new UserInputException("Encryption password is invalid.");
         }
 
-        EncryptSecrets(configToPersist, encryptionPassword!);
+        ClearDatabasePayloads(configToPersist);
+        MarkPlaintextTrashPayloads(configToPersist);
+        MarkProtectedAtRest(configToPersist);
         RefreshConnectionStrings(configToPersist);
+        configToPersist.EncryptedPayload = _configPasswordProtector.EncryptSecret(SerializeFullConfigPayload(configToPersist), encryptionPassword!);
+        configToPersist.SelectedServerName = string.Empty;
+        configToPersist.Timeouts = new SqlTimeoutConfig();
+        configToPersist.Servers = [];
+        configToPersist.Trash = [];
         await _configStore.SaveAsync(configPath, configToPersist, cancellationToken);
     }
 
@@ -695,6 +821,8 @@ END
         {
             MarkPlaintextSecrets(workingConfig);
             RefreshConnectionStrings(workingConfig);
+            ClearDatabasePayloads(workingConfig);
+            MarkPlaintextTrashPayloads(workingConfig);
             return workingConfig;
         }
 
@@ -718,8 +846,21 @@ END
             throw new UserInputException("Encryption password is invalid.");
         }
 
+        if (HasFullConfigEnvelope(workingConfig))
+        {
+            var decryptedConfig = DeserializeFullConfigPayload(_configPasswordProtector.DecryptSecret(workingConfig.EncryptedPayload, encryptionPassword!));
+            decryptedConfig.EncryptPasswords = true;
+            decryptedConfig.EncryptionKey = workingConfig.EncryptionKey;
+            decryptedConfig.EncryptedPayload = string.Empty;
+            ConfigStore.NormalizeLoadedConfig(decryptedConfig);
+            RefreshConnectionStrings(decryptedConfig);
+            return decryptedConfig;
+        }
+
+        DecryptDatabasePayloads(workingConfig, encryptionPassword!);
         DecryptSecrets(workingConfig, encryptionPassword!);
         RefreshConnectionStrings(workingConfig);
+        DecryptTrashPayloads(workingConfig, encryptionPassword!);
         return workingConfig;
     }
 
@@ -729,6 +870,7 @@ END
             SelectedServerName = source.SelectedServerName,
             EncryptPasswords = source.EncryptPasswords,
             EncryptionKey = source.EncryptionKey,
+            EncryptedPayload = source.EncryptedPayload,
             Timeouts = new SqlTimeoutConfig
             {
                 ConnectionTimeoutSeconds = source.Timeouts.ConnectionTimeoutSeconds,
@@ -736,35 +878,69 @@ END
             },
             Servers = source.Servers.Select(server => new ServerConfig
             {
+                EntryId = server.EntryId,
                 ServerName = server.ServerName,
                 Provider = server.Provider,
                 Port = server.Port,
                 AdminDatabase = server.AdminDatabase,
                 AdminUsername = server.AdminUsername,
                 AdminPassword = server.AdminPassword,
+                DatabasesPayload = server.DatabasesPayload,
                 Encrypted = server.Encrypted,
+                VersionHistory = server.VersionHistory.Select(CloneVersion).ToList(),
                 Databases = server.Databases.Select(database => new DatabaseConfig
                 {
+                    EntryId = database.EntryId,
                     DatabaseName = database.DatabaseName,
+                    VersionHistory = database.VersionHistory.Select(CloneVersion).ToList(),
                     Users = database.Users.Select(user => new UserConfig
                     {
+                        EntryId = user.EntryId,
                         Username = user.Username,
                         Password = user.Password,
                         Encrypted = user.Encrypted,
                         Roles = user.Roles.ToList(),
-                        ConnectionString = user.ConnectionString
+                        ConnectionString = user.ConnectionString,
+                        VersionHistory = user.VersionHistory.Select(CloneVersion).ToList()
                     }).ToList()
                 }).ToList()
+            }).ToList(),
+            Trash = source.Trash.Select(entry => new TrashEntry
+            {
+                TrashId = entry.TrashId,
+                EntryType = entry.EntryType,
+                EntryId = entry.EntryId,
+                DisplayName = entry.DisplayName,
+                ParentServerName = entry.ParentServerName,
+                ParentDatabaseName = entry.ParentDatabaseName,
+                DeletedAtUtc = entry.DeletedAtUtc,
+                Details = entry.Details,
+                PayloadJson = entry.PayloadJson,
+                VersionHistory = entry.VersionHistory.Select(CloneVersion).ToList()
             }).ToList()
         };
 
     private SqlManagerConfig BuildLockedConfigView(SqlManagerConfig config)
     {
+        if (HasFullConfigEnvelope(config))
+        {
+            config.SelectedServerName = string.Empty;
+            config.Timeouts = new SqlTimeoutConfig();
+            config.Servers = [];
+            config.Trash = [];
+            return config;
+        }
+
         foreach (var server in config.Servers)
         {
             if (server.Encrypted)
             {
                 server.AdminPassword = string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace(server.DatabasesPayload))
+            {
+                server.Databases = [];
             }
 
             foreach (var user in server.Databases.SelectMany(database => database.Users))
@@ -774,6 +950,11 @@ END
                     user.Password = string.Empty;
                 }
             }
+        }
+
+        foreach (var trashEntry in config.Trash)
+        {
+            trashEntry.PayloadJson = string.Empty;
         }
 
         return config;
@@ -795,6 +976,43 @@ END
                     user.Password = _configPasswordProtector.DecryptSecret(user.Password, encryptionPassword);
                 }
             }
+        }
+    }
+
+    private void EncryptDatabasePayloads(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var server in config.Servers)
+        {
+            if (server.Databases.Count == 0)
+            {
+                server.DatabasesPayload = string.Empty;
+                continue;
+            }
+
+            server.DatabasesPayload = _configPasswordProtector.EncryptSecret(SerializeDatabaseCollection(server.Databases), encryptionPassword);
+            server.Databases = [];
+        }
+    }
+
+    private void DecryptDatabasePayloads(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var server in config.Servers)
+        {
+            if (string.IsNullOrWhiteSpace(server.DatabasesPayload))
+            {
+                continue;
+            }
+
+            server.Databases = DeserializeDatabaseCollection(_configPasswordProtector.DecryptSecret(server.DatabasesPayload, encryptionPassword));
+            server.DatabasesPayload = string.Empty;
+        }
+    }
+
+    private static void ClearDatabasePayloads(SqlManagerConfig config)
+    {
+        foreach (var server in config.Servers)
+        {
+            server.DatabasesPayload = string.Empty;
         }
     }
 
@@ -839,6 +1057,42 @@ END
         }
     }
 
+    private static void MarkProtectedAtRest(SqlManagerConfig config)
+    {
+        foreach (var server in config.Servers)
+        {
+            server.Encrypted = !string.IsNullOrWhiteSpace(server.AdminPassword);
+            foreach (var user in server.Databases.SelectMany(database => database.Users))
+            {
+                user.Encrypted = !string.IsNullOrWhiteSpace(user.Password);
+            }
+        }
+    }
+
+    private void EncryptTrashPayloads(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var entry in config.Trash)
+        {
+            entry.PayloadJson = TransformTrashPayload(entry, encryptionPassword, encrypt: true);
+        }
+    }
+
+    private void DecryptTrashPayloads(SqlManagerConfig config, string encryptionPassword)
+    {
+        foreach (var entry in config.Trash)
+        {
+            entry.PayloadJson = TransformTrashPayload(entry, encryptionPassword, encrypt: false);
+        }
+    }
+
+    private static void MarkPlaintextTrashPayloads(SqlManagerConfig config)
+    {
+        foreach (var entry in config.Trash)
+        {
+            entry.PayloadJson ??= string.Empty;
+        }
+    }
+
     private static void RefreshConnectionStrings(SqlManagerConfig config)
     {
         foreach (var server in config.Servers)
@@ -857,6 +1111,114 @@ END
             }
         }
     }
+
+    private string TransformTrashPayload(TrashEntry entry, string encryptionPassword, bool encrypt)
+    {
+        if (string.IsNullOrWhiteSpace(entry.PayloadJson))
+        {
+            return string.Empty;
+        }
+
+        return entry.EntryType switch
+        {
+            TrashEntryTypeServer => SerializeTrashPayload(TransformServerSnapshotSecrets(DeserializeTrashPayload<ServerConfig>(entry), encryptionPassword, encrypt)),
+            TrashEntryTypeDatabase => SerializeTrashPayload(TransformDatabaseSnapshotSecrets(DeserializeTrashPayload<DatabaseConfig>(entry), encryptionPassword, encrypt)),
+            TrashEntryTypeUser => SerializeTrashPayload(TransformUserSnapshotSecrets(DeserializeTrashPayload<UserConfig>(entry), encryptionPassword, encrypt)),
+            _ => entry.PayloadJson
+        };
+    }
+
+    private ServerConfig TransformServerSnapshotSecrets(ServerConfig server, string encryptionPassword, bool encrypt)
+    {
+        if (encrypt)
+        {
+            if (string.IsNullOrWhiteSpace(server.AdminPassword))
+            {
+                server.Encrypted = false;
+            }
+            else
+            {
+                server.AdminPassword = _configPasswordProtector.EncryptSecret(server.AdminPassword, encryptionPassword);
+                server.Encrypted = true;
+            }
+        }
+        else if (server.Encrypted && !string.IsNullOrWhiteSpace(server.AdminPassword))
+        {
+            server.AdminPassword = _configPasswordProtector.DecryptSecret(server.AdminPassword, encryptionPassword);
+        }
+
+        foreach (var database in server.Databases)
+        {
+            TransformDatabaseSnapshotSecrets(database, encryptionPassword, encrypt);
+        }
+
+        RefreshConnectionStrings(server);
+        return server;
+    }
+
+    private DatabaseConfig TransformDatabaseSnapshotSecrets(DatabaseConfig database, string encryptionPassword, bool encrypt)
+    {
+        foreach (var user in database.Users)
+        {
+            TransformUserSnapshotSecrets(user, encryptionPassword, encrypt);
+        }
+
+        return database;
+    }
+
+    private UserConfig TransformUserSnapshotSecrets(UserConfig user, string encryptionPassword, bool encrypt)
+    {
+        if (encrypt)
+        {
+            if (string.IsNullOrWhiteSpace(user.Password))
+            {
+                user.Encrypted = false;
+            }
+            else
+            {
+                user.Password = _configPasswordProtector.EncryptSecret(user.Password, encryptionPassword);
+                user.Encrypted = true;
+            }
+        }
+        else if (user.Encrypted && !string.IsNullOrWhiteSpace(user.Password))
+        {
+            user.Password = _configPasswordProtector.DecryptSecret(user.Password, encryptionPassword);
+        }
+
+        return user;
+    }
+
+    private static string SerializeTrashPayload<T>(T value)
+        => JsonSerializer.Serialize(value);
+
+    private static string SerializeFullConfigPayload(SqlManagerConfig config)
+        => JsonSerializer.Serialize(config);
+
+    private static SqlManagerConfig DeserializeFullConfigPayload(string payload)
+        => JsonSerializer.Deserialize<SqlManagerConfig>(payload)
+            ?? throw new UserInputException("Stored config payload is not in the expected encrypted format.");
+
+    private static string SerializeDatabaseCollection(IReadOnlyList<DatabaseConfig> databases)
+        => JsonSerializer.Serialize(databases);
+
+    private static List<DatabaseConfig> DeserializeDatabaseCollection(string payload)
+        => JsonSerializer.Deserialize<List<DatabaseConfig>>(payload) ?? [];
+
+    private static T DeserializeTrashPayload<T>(TrashEntry entry)
+        => JsonSerializer.Deserialize<T>(entry.PayloadJson)
+            ?? throw new UserInputException($"Trash entry '{entry.DisplayName}' is not in a valid format.");
+
+    private static EntryVersion CloneVersion(EntryVersion version)
+        => new()
+        {
+            VersionNumber = version.VersionNumber,
+            ChangedAtUtc = version.ChangedAtUtc,
+            Summary = version.Summary,
+            Details = version.Details
+        };
+
+    private static bool HasFullConfigEnvelope(SqlManagerConfig config)
+        => !string.IsNullOrWhiteSpace(config.EncryptedPayload);
 
     private static string SelectConfiguredServerName(SqlManagerConfig config)
     {
@@ -877,6 +1239,58 @@ END
 
     private static ServerConfig? FindServer(SqlManagerConfig config, string serverName)
         => config.Servers.FirstOrDefault(server => server.ServerName.Equals(serverName, StringComparison.OrdinalIgnoreCase));
+
+    private static void AddVersion(List<EntryVersion> versionHistory, string summary, string details)
+    {
+        versionHistory ??= [];
+        versionHistory.Add(new EntryVersion
+        {
+            VersionNumber = versionHistory.Count == 0 ? 1 : versionHistory.Max(version => version.VersionNumber) + 1,
+            ChangedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            Summary = summary,
+            Details = details
+        });
+    }
+
+    private static string BuildServerVersionDetails(ServerConfig server)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Provider: {SqlProviders.GetDisplayName(server.Provider)}",
+            $"Port: {(server.Port?.ToString() ?? "<default>")}",
+            $"Admin Database: {server.AdminDatabase}",
+            $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
+            $"Password State: {BuildPasswordState(server.AdminPassword, server.Encrypted)}",
+            $"Tracked Databases: {server.Databases.Count}",
+            $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"
+        ]);
+
+    private static string BuildDatabaseVersionDetails(ServerConfig server, DatabaseConfig database)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {database.DatabaseName}",
+            $"Tracked Users: {database.Users.Count}",
+            $"Users: {(database.Users.Count == 0 ? "<none>" : string.Join(", ", database.Users.Select(user => user.Username).OrderBy(name => name, StringComparer.OrdinalIgnoreCase)))}"
+        ]);
+
+    private static string BuildUserVersionDetails(ServerConfig server, DatabaseConfig database, UserConfig user)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {database.DatabaseName}",
+            $"User: {user.Username}",
+            $"Password State: {BuildPasswordState(user.Password, user.Encrypted)}",
+            $"Roles: {(user.Roles.Count == 0 ? "<none>" : string.Join(", ", user.Roles))}",
+            $"Connection String: {user.ConnectionString}"
+        ]);
+
+    private static string BuildPasswordState(string? password, bool encrypted)
+        => encrypted
+            ? "encrypted"
+            : string.IsNullOrWhiteSpace(password)
+                ? "missing"
+                : "saved";
 
     private static ServerConfig GetOrCreateServer(SqlManagerConfig config, string serverName, string? provider, int? port, string? adminDatabase, string? adminUsername, string? adminPassword)
     {
@@ -982,6 +1396,55 @@ END
                 .ToList();
         }
     }
+
+    private void SoftDeleteDatabase(SqlManagerConfig config, ServerConfig server, string databaseName, string? encryptionPassword)
+    {
+        var database = server.Databases.FirstOrDefault(candidate => candidate.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase));
+        if (database is null)
+        {
+            return;
+        }
+
+        AddVersion(database.VersionHistory, "Moved to trash.", BuildDatabaseVersionDetails(server, database));
+        config.Trash.Add(CreateTrashEntry(TrashEntryTypeDatabase, database.EntryId, database.DatabaseName, server.ServerName, string.Empty, BuildDatabaseVersionDetails(server, database), SerializeTrashPayload(database), database.VersionHistory));
+        server.Databases = server.Databases.Where(candidate => !candidate.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase)).ToList();
+    }
+
+    private void SoftDeleteUsersFromConfigDatabases(SqlManagerConfig config, ServerConfig server, string userName, IReadOnlyCollection<string>? databaseNames, string? encryptionPassword)
+    {
+        foreach (var database in server.Databases)
+        {
+            if (databaseNames is not null
+                && databaseNames.Count > 0
+                && !databaseNames.Contains(database.DatabaseName, StringComparer.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var removedUsers = database.Users.Where(user => user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)).ToList();
+            foreach (var user in removedUsers)
+            {
+                AddVersion(user.VersionHistory, "Moved to trash.", BuildUserVersionDetails(server, database, user));
+                config.Trash.Add(CreateTrashEntry(TrashEntryTypeUser, user.EntryId, user.Username, server.ServerName, database.DatabaseName, BuildUserVersionDetails(server, database, user), SerializeTrashPayload(user), user.VersionHistory));
+            }
+
+            database.Users = database.Users.Where(user => !user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+    }
+
+    private static TrashEntry CreateTrashEntry(string entryType, string entryId, string displayName, string parentServerName, string parentDatabaseName, string details, string payloadJson, IReadOnlyList<EntryVersion> versionHistory)
+        => new()
+        {
+            EntryType = entryType,
+            EntryId = entryId,
+            DisplayName = displayName,
+            ParentServerName = parentServerName,
+            ParentDatabaseName = parentDatabaseName,
+            DeletedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            Details = details,
+            PayloadJson = payloadJson,
+            VersionHistory = versionHistory.Select(CloneVersion).ToList()
+        };
 
     private static void UpdateUserPasswordInConfig(ServerConfig server, string provider, string serverName, int? port, string userName, string password)
     {

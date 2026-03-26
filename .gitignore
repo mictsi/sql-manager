@@ -55,4 +55,3 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 
-sql-manager.ps1

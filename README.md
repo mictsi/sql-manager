@@ -2,33 +2,22 @@
 
 SQL Server and PostgreSQL management utility with:
 
-- the original PowerShell automation script
 - a .NET 10 command-line utility
 - a built-in terminal UI for interactive management
 
 ## Files
 
-- `sql-manager.ps1`: Main automation script.
 - `sql-config.json`: Stores multiple servers, provider settings, selected server, databases, users, roles, and connection strings.
 - `src/SqlManager`: .NET 10 implementation that can be published as single-file binaries for Windows, macOS, and Linux.
+- `build.ps1` and `test.ps1`: Optional local build and validation helpers.
 
 ## Requirements
 
-- PowerShell 7 only
 - Network access to the target SQL Server or PostgreSQL host
-- Permission to install PowerShell modules for the current user
-
-For the .NET utility:
-
 - .NET SDK 10 to build locally
+- PowerShell 7 to run `build.ps1` or `test.ps1` locally
 - No .NET installation is required on the target machine when using the self-contained publish output
 - Choose the runtime identifier that matches the target OS and architecture, for example `win-x64`, `osx-arm64`, `linux-x64`, or `linux-musl-x64`
-
-The PowerShell script checks for the module in the local `modules` directory first, then falls back to installed modules, and only then installs it:
-
-```powershell
-Install-Module -Name SqlServer
-```
 
 ## Config Structure
 
@@ -140,6 +129,12 @@ Enable config encryption from the CLI:
 .\src\SqlManager\bin\Debug\net10.0\sql-manager.exe enable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
 ```
 
+Migrate an older encrypted config to the current full-file encrypted format:
+
+```powershell
+.\src\SqlManager\bin\Debug\net10.0\sql-manager.exe migrate-config-encryption-format --config-path .\sql-config.json --encryption-password "ComplexPass!123"
+```
+
 Disable config encryption from the CLI:
 
 ```powershell
@@ -188,13 +183,13 @@ Create a PostgreSQL user with the same generic role syntax:
 .\src\SqlManager\bin\Debug\net10.0\sql-manager.exe create-user --server-name pg01.contoso.local --admin-username postgres --admin-password "Secret123!" --database-name appdb --user-name app_reader --roles db_datareader
 ```
 
-PowerShell-style compatibility is also supported:
+Legacy action-style compatibility is also supported:
 
 ```powershell
 .\src\SqlManager\bin\Debug\net10.0\sql-manager.exe --action CreateUser --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles dbowner
 ```
 
-The .NET app is provider-aware. The legacy PowerShell script remains SQL Server-oriented.
+The .NET app is provider-aware for both SQL Server and PostgreSQL.
 
 Publish a single-file self-contained binary for one runtime:
 
@@ -265,95 +260,9 @@ Run validation locally with:
 .\test.ps1 -Configuration Release
 ```
 
-### PowerShell Script
-
-Initialize the config file:
-
-```powershell
-.\sql-manager.ps1 -Action InitConfig -ConfigPath .\sql-config.json
-```
-
-Add two servers to the config:
-
-```powershell
-.\sql-manager.ps1 -Action AddServer -ConfigPath .\sql-config.json -ServerName sql01.contoso.local -AdminUsername sa
-.\sql-manager.ps1 -Action AddServer -ConfigPath .\sql-config.json -ServerName sql02.contoso.local -AdminUsername admin_user
-```
-
-Select a default server from the config:
-
-```powershell
-.\sql-manager.ps1 -Action SelectServer -ConfigPath .\sql-config.json -ServerName sql01.contoso.local
-```
-
-Synchronize the config with databases and users already present on a server:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action SyncServer -AdminPassword $adminPassword -ServerName sql01.contoso.local -AdminUsername sa
-```
-
-Create a database:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action CreateDatabase -AdminPassword $adminPassword -DatabaseName LabDB
-```
-
-Create a user with generated password and roles:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action CreateUser -AdminPassword $adminPassword -DatabaseName LabDB -UserName LabDBUser -Roles dbowner,db_reader,db_writer
-```
-
-Create a user with a specific password:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-$newUserPassword = Read-Host "New SQL user password" -AsSecureString
-.\sql-manager.ps1 -Action CreateUser -AdminPassword $adminPassword -DatabaseName LabDB -UserName LabDBUser -Roles dbowner -NewUserPassword $newUserPassword
-```
-
-Add a role to an existing user:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action AddRole -AdminPassword $adminPassword -DatabaseName LabDB -UserName LabDBUser -Roles db_reader
-```
-
-Show existing users and roles in a table:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action ShowUsers -AdminPassword $adminPassword -DatabaseName LabDB
-```
-
-Remove a user from only one database:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action RemoveUser -AdminPassword $adminPassword -DatabaseName LabDB -UserName LabDBUser -RemovalScope Database
-```
-
-Remove a user and login from the whole server:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-.\sql-manager.ps1 -Action RemoveUser -AdminPassword $adminPassword -UserName LabDBUser -RemovalScope Server
-```
-
-Update a user's password:
-
-```powershell
-$adminPassword = Read-Host "SQL admin password" -AsSecureString
-$updatedPassword = Read-Host "Updated SQL user password" -AsSecureString
-.\sql-manager.ps1 -Action UpdatePassword -AdminPassword $adminPassword -UserName LabDBUser -NewUserPassword $updatedPassword
-```
-
 ## Notes
 
-- Multiple servers are supported in `sql-config.json`. When `ServerName` is omitted, the script uses the selected server or prompts you to choose one from the config.
+- Multiple servers are supported in `sql-config.json`. When `ServerName` is omitted, the utility uses the selected server or prompts you to choose one from the config.
 - The .NET utility defaults to TUI mode when started without arguments and falls back to subcommands when arguments are supplied.
 - The TUI exposes an explicit main-menu exit action and a `Select active server` flow that lists configured servers together with their admin usernames and whether an admin password is already saved.
 - `View Config` is the place to inspect the config summary, configured servers, tracked databases, and tracked users.
@@ -365,5 +274,5 @@ $updatedPassword = Read-Host "Updated SQL user password" -AsSecureString
 - `ShowDatabases`, `CreateDatabase`, `RemoveDatabase`, `CreateUser`, `AddRole`, `ShowUsers`, `RemoveUser`, and `UpdatePassword` can read `ServerName`, `AdminUsername`, and the saved admin password from `sql-config.json`.
 - Accepted role names are `dbowner` or `db_owner`, `dbreader` or `db_reader` or `db_datareader`, and `dbwriter` or `db_writer` or `db_datawriter`.
 - Generated passwords are 20 characters long and include uppercase, lowercase, numeric, and special characters.
-- If a login already exists and the script does not know its password, pass `-NewUserPassword` so the script can update the login and create a correct connection string.
-- The config stores server admin passwords and user passwords in plain text because it also stores ready-to-use connection strings. Treat `sql-config.json` as sensitive.
+- If a login already exists and the utility does not know its password, pass `-NewUserPassword` so the utility can update the login and create a correct connection string.
+- Treat `sql-config.json` as sensitive. When config encryption is disabled, stored admin and user passwords may be written in plaintext.

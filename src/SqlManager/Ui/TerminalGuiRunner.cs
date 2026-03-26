@@ -2,6 +2,8 @@ using System.Drawing;
 using System.Collections.ObjectModel;
 using Terminal.Gui;
 using Terminal.Gui.App;
+using Terminal.Gui.Drivers;
+using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
 
@@ -20,6 +22,9 @@ internal sealed class TerminalGuiRunner
     private string? _activeServer;
     private Label? _activeServerLabel;
     private Button? _initialMainButton;
+    private readonly List<IReadOnlyList<Button>> _mainMenuColumns = [];
+    private readonly Dictionary<Button, (int ColumnIndex, int RowIndex)> _mainMenuButtonPositions = [];
+    private bool _exitConfirmationApproved;
     private int _exitCode;
 
     public TerminalGuiRunner(SqlManagerService service)
@@ -64,6 +69,11 @@ internal sealed class TerminalGuiRunner
             _config = summary.Value;
             _activeServer = ResolveActiveServerName(_config);
 
+            if (_config.EncryptPasswords && !PromptForStartupEncryptionPassword())
+            {
+                return _exitCode == 0 ? 1 : _exitCode;
+            }
+
             var window = new Window
             {
                 Title = $"SQL Manager v{AppVersion.DisplayVersion}",
@@ -73,6 +83,7 @@ internal sealed class TerminalGuiRunner
                 Height = Dim.Fill(),
                 TabStop = TabBehavior.TabGroup
             };
+            window.IsRunningChanging += OnMainWindowIsRunningChanging;
 
             BuildMainWindow(window);
             RefreshViews();
@@ -101,8 +112,12 @@ internal sealed class TerminalGuiRunner
             X = 1,
             Y = 1,
             Width = Dim.Fill(1),
-            Text = "Tab moves across actions. Enter runs the selected action."
+            Text = "Use Up/Down within a column, Left/Right across columns, Tab to cycle, and Enter to run the selected action."
         };
+
+        _initialMainButton = null;
+        _mainMenuColumns.Clear();
+        _mainMenuButtonPositions.Clear();
 
         var serverActions = new (string Title, Action Action)[]
         {
@@ -129,21 +144,23 @@ internal sealed class TerminalGuiRunner
             ("View Config", (Action)ShowConfigDialog),
             ("Initialize Config", (Action)ShowInitializeConfigDialog),
             ("Toggle Encrypt Passwords", (Action)ShowPasswordEncryptionDialog),
+            ("Trash Bin", (Action)ShowTrashBinDialog),
             ("Refresh", (Action)ReloadAndRefresh),
-            ("Exit", (Action)(() => RequireApp().RequestStop()))
+            ("Exit", (Action)TryRequestApplicationExit)
         };
 
-        AddMenuColumn(window, "Server Management", 1, 3, Dim.Percent(33) - 2, serverActions);
-        AddMenuColumn(window, "User Management", Pos.Percent(33) + 1, 3, Dim.Percent(33) - 2, userActions);
-        AddMenuColumn(window, "Configuration", Pos.Percent(66) + 1, 3, Dim.Fill(2), configurationActions);
+        _mainMenuColumns.Add(AddMenuColumn(window, 0, "Server Management", 1, 3, Dim.Percent(33) - 2, serverActions));
+        _mainMenuColumns.Add(AddMenuColumn(window, 1, "User Management", Pos.Percent(33) + 1, 3, Dim.Percent(33) - 2, userActions));
+        _mainMenuColumns.Add(AddMenuColumn(window, 2, "Configuration", Pos.Percent(66) + 1, 3, Dim.Fill(2), configurationActions));
 
         window.Add(_activeServerLabel, instructionsLabel);
     }
 
-    private void AddMenuColumn(Window window, string title, Pos x, int topY, Dim width, IReadOnlyList<(string Title, Action Action)> actions)
+    private List<Button> AddMenuColumn(Window window, int columnIndex, string title, Pos x, int topY, Dim width, IReadOnlyList<(string Title, Action Action)> actions)
     {
         var headingText = title.ToUpperInvariant();
         var headingUnderline = new string('=', Math.Max(headingText.Length + 6, 20));
+        var buttons = new List<Button>(actions.Count);
 
         window.Add(new Label
         {
@@ -164,6 +181,7 @@ internal sealed class TerminalGuiRunner
         });
 
         View? previous = null;
+        var rowIndex = 0;
         foreach (var (actionTitle, action) in actions)
         {
             var button = new Button
@@ -180,6 +198,7 @@ internal sealed class TerminalGuiRunner
                 args.Handled = true;
                 RunGuardedUiAction(actionTitle, action);
             };
+            button.KeyDown += (_, key) => HandleMainMenuKeyDown(button, key);
             if (_initialMainButton is null)
             {
                 _initialMainButton = button;
@@ -187,7 +206,49 @@ internal sealed class TerminalGuiRunner
 
             window.Add(button);
             previous = button;
+            buttons.Add(button);
+            _mainMenuButtonPositions[button] = (columnIndex, rowIndex++);
         }
+
+        return buttons;
+    }
+
+    private void HandleMainMenuKeyDown(Button button, Key key)
+    {
+        if (!_mainMenuButtonPositions.TryGetValue(button, out var position))
+        {
+            return;
+        }
+
+        if (key.KeyCode == KeyCode.CursorLeft)
+        {
+            MoveMainMenuFocus(position.ColumnIndex - 1, position.RowIndex);
+            key.Handled = true;
+            return;
+        }
+
+        if (key.KeyCode == KeyCode.CursorRight)
+        {
+            MoveMainMenuFocus(position.ColumnIndex + 1, position.RowIndex);
+            key.Handled = true;
+        }
+    }
+
+    private void MoveMainMenuFocus(int targetColumnIndex, int preferredRowIndex)
+    {
+        if (targetColumnIndex < 0 || targetColumnIndex >= _mainMenuColumns.Count)
+        {
+            return;
+        }
+
+        var column = _mainMenuColumns[targetColumnIndex];
+        if (column.Count == 0)
+        {
+            return;
+        }
+
+        var targetRowIndex = Math.Clamp(preferredRowIndex, 0, column.Count - 1);
+        column[targetRowIndex].SetFocus();
     }
 
     private void RefreshViews()
@@ -270,7 +331,7 @@ internal sealed class TerminalGuiRunner
                 "encryptPasswords is enabled and currently unlocked.",
                 "Turn Off",
                 "Relock",
-                "Cancel");
+                "Close");
 
             if (action == 0)
             {
@@ -294,7 +355,7 @@ internal sealed class TerminalGuiRunner
             "encryptPasswords is enabled and currently locked.",
             "Unlock",
             "Turn Off",
-            "Cancel");
+            "Close");
 
         if (lockedAction == 0)
         {
@@ -316,6 +377,7 @@ internal sealed class TerminalGuiRunner
             "Enable Password Encryption",
             78,
             14,
+            "Enable",
             dialog =>
             {
                 dialog.Add(new Label
@@ -363,6 +425,7 @@ internal sealed class TerminalGuiRunner
             "Unlock Passwords",
             72,
             10,
+            "Unlock",
             dialog => AddField(dialog, 1, "Encryption Password:", passwordField),
             () =>
             {
@@ -394,6 +457,59 @@ internal sealed class TerminalGuiRunner
         }
     }
 
+    private bool PromptForStartupEncryptionPassword()
+    {
+        while (true)
+        {
+            var passwordField = CreateSecretField();
+            var result = ShowFormDialog(
+                "Unlock Encrypted Config",
+                76,
+                12,
+                "OK",
+                dialog =>
+                {
+                    dialog.Add(new Label
+                    {
+                        X = 1,
+                        Y = 1,
+                        Width = Dim.Fill(2),
+                        Text = "This config has encryptPasswords enabled. Enter the decryption password to start the UI."
+                    });
+                    AddField(dialog, 4, "Encryption Password:", passwordField);
+                },
+                () =>
+                {
+                    var password = GetRequiredText(passwordField, "Encryption password is required.");
+                    var summary = WaitForTaskCompletion(
+                        _service.LoadConfigSummaryAsync(_configPath, password, _cancellationToken),
+                        "Unlock Encrypted Config",
+                        "Validating encryption password...");
+                    if (!summary.Succeeded || summary.Value is null)
+                    {
+                        return OperationExecutionResult.Failure(OperationResult.Failure(summary.Message, summary.ExitCode, summary.Details.ToArray()));
+                    }
+
+                    _configEncryptionPassword.Set(password);
+                    _config = summary.Value;
+                    _activeServer = ResolveActiveServerName(_config);
+                    return OperationExecutionResult.FromResult(OperationResult.Success("Configuration unlocked."));
+                },
+                backButtonText: "Exit");
+
+            if (result is not null)
+            {
+                return true;
+            }
+
+            if (ConfirmExitApplication())
+            {
+                _exitCode = 1;
+                return false;
+            }
+        }
+    }
+
     private void ShowDisablePasswordEncryptionDialog(bool promptForPassword)
     {
         if (promptForPassword)
@@ -403,6 +519,7 @@ internal sealed class TerminalGuiRunner
                 "Turn Off Encrypt Passwords",
                 72,
                 10,
+                "Turn Off",
                 dialog => AddField(dialog, 1, "Encryption Password:", passwordField),
                 () => DisablePasswordEncryption(GetRequiredText(passwordField, "Encryption password is required.")));
 
@@ -487,6 +604,7 @@ internal sealed class TerminalGuiRunner
             "Initialize Config",
             72,
             14,
+            "Save",
             dialog =>
             {
                 AddField(dialog, 1, "Server Name (optional):", serverField);
@@ -549,8 +667,8 @@ internal sealed class TerminalGuiRunner
 
         var saveButton = new Button { Text = isEdit ? "Save" : "Add" };
         var showPasswordButton = new Button { Text = "Show Password" };
+        var versionHistoryButton = new Button { Text = "See Version History" };
         var backButton = new Button { Text = "Back" };
-        var cancelButton = new Button { Text = "Cancel" };
         var dialog = new Dialog
         {
             Title = isEdit ? $"Edit Server: {existingServer!.ServerName}" : "Add Server",
@@ -566,8 +684,8 @@ internal sealed class TerminalGuiRunner
         AddField(dialog, 9, "Admin User:", adminUserField);
         AddField(dialog, 11, "Admin Password:", adminPasswordField);
         dialog.Buttons = isEdit
-            ? [saveButton, showPasswordButton, backButton, cancelButton]
-            : [saveButton, backButton, cancelButton];
+            ? [saveButton, showPasswordButton, versionHistoryButton, backButton]
+            : [saveButton, backButton];
 
         OperationExecutionResult? result = null;
         saveButton.Accepting += (_, args) =>
@@ -635,12 +753,15 @@ internal sealed class TerminalGuiRunner
 
             MessageBox.Query(RequireApp(), $"Password: {GetText(serverField)}", password, "OK");
         };
-        backButton.Accepting += (_, args) =>
+        versionHistoryButton.Accepting += (_, args) =>
         {
             args.Handled = true;
-            dialog.RequestStop();
+            if (existingServer is not null)
+            {
+                ShowVersionHistoryDialog($"Server History: {existingServer.ServerName}", existingServer.VersionHistory);
+            }
         };
-        cancelButton.Accepting += (_, args) =>
+        backButton.Accepting += (_, args) =>
         {
             args.Handled = true;
             dialog.RequestStop();
@@ -670,6 +791,7 @@ internal sealed class TerminalGuiRunner
             "Sync Server",
             server,
             12,
+            "Sync",
             dialog =>
             {
                 AddAdminCredentialSection(dialog, 1, server, adminUserField, adminPasswordField);
@@ -708,12 +830,13 @@ internal sealed class TerminalGuiRunner
             "Create Database",
             server,
             14,
+            "Create",
             dialog =>
             {
                 var nextY = AddAdminCredentialSection(dialog, 1, server, adminUserField, adminPasswordField);
                 AddField(dialog, nextY, "Database Name:", databaseField);
             },
-            () => ExecuteOperation(_service.CreateDatabaseAsync(new CommandOptions
+            () => ExecuteDatabaseSaveOperation(_service.CreateDatabaseAsync(new CommandOptions
             {
                 Command = CommandKind.CreateDatabase,
                 ConfigPath = _configPath,
@@ -761,9 +884,7 @@ internal sealed class TerminalGuiRunner
         ShowResult(result);
         if (result.Succeeded && result.Value is { Count: > 0 })
         {
-            ShowTextDialog(
-                $"Databases on {server.ServerName}",
-                string.Join(Environment.NewLine, result.Value));
+            ShowDatabaseEntriesDialog(server, result.Value);
         }
     }
 
@@ -787,6 +908,7 @@ internal sealed class TerminalGuiRunner
             "Remove Database",
             server,
             16,
+            "Remove",
             dialog =>
             {
                 dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
@@ -799,7 +921,7 @@ internal sealed class TerminalGuiRunner
                     Text = "This drops the database from SQL Server and removes it from the config."
                 });
             },
-            () => ExecuteOperation(_service.RemoveDatabaseAsync(new CommandOptions
+            () => ExecuteDatabaseSaveOperation(_service.RemoveDatabaseAsync(new CommandOptions
             {
                 Command = CommandKind.RemoveDatabase,
                 ConfigPath = _configPath,
@@ -876,6 +998,7 @@ internal sealed class TerminalGuiRunner
             "Show Users",
             server,
             14,
+            "Show",
             dialog =>
             {
                 dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
@@ -944,6 +1067,7 @@ internal sealed class TerminalGuiRunner
             "Remove User",
             server,
             dialogHeight,
+            "Remove",
             dialog =>
             {
                 dialog.Add(new Label { X = 1, Y = 1, Text = $"User: {userName}" });
@@ -994,7 +1118,7 @@ internal sealed class TerminalGuiRunner
                     throw new UserInputException("Select at least one database, or choose to remove the server login.");
                 }
 
-                return ExecuteOperation(_service.RemoveUserAsync(new CommandOptions
+                return ExecuteDatabaseSaveOperation(_service.RemoveUserAsync(new CommandOptions
                 {
                     Command = CommandKind.RemoveUser,
                     ConfigPath = _configPath,
@@ -1038,13 +1162,14 @@ internal sealed class TerminalGuiRunner
             "Update Password",
             server,
             16,
+            "Update",
             dialog =>
             {
                 dialog.Add(new Label { X = 1, Y = 1, Text = $"User: {userName}" });
                 var nextY = AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
                 AddField(dialog, nextY, "New Password (optional):", newPasswordField);
             },
-            () => ExecuteOperation(_service.UpdatePasswordAsync(new CommandOptions
+            () => ExecuteDatabaseSaveOperation(_service.UpdatePasswordAsync(new CommandOptions
             {
                 Command = CommandKind.UpdatePassword,
                 ConfigPath = _configPath,
@@ -1077,6 +1202,7 @@ internal sealed class TerminalGuiRunner
             title,
             server,
             dialogHeight,
+            title == "Create User" ? "Create" : "Save",
             dialog =>
             {
                 var currentY = 1;
@@ -1152,7 +1278,7 @@ internal sealed class TerminalGuiRunner
                     throw new UserInputException("Select at least one database role, or use Remove User to remove the login entirely.");
                 }
 
-                return ExecuteOperation(_service.SetUserAccessAsync(new CommandOptions
+                return ExecuteDatabaseSaveOperation(_service.SetUserAccessAsync(new CommandOptions
                 {
                     Command = CommandKind.CreateUser,
                     ConfigPath = _configPath,
@@ -1173,11 +1299,10 @@ internal sealed class TerminalGuiRunner
         }
     }
 
-    private OperationExecutionResult? ShowFormDialog(string title, int width, int height, Action<Dialog> buildBody, Func<OperationExecutionResult> submit)
+    private OperationExecutionResult? ShowFormDialog(string title, int width, int height, string primaryButtonText, Action<Dialog> buildBody, Func<OperationExecutionResult> submit, string backButtonText = "Back")
     {
-        var runButton = new Button { Text = "Run" };
-        var backButton = new Button { Text = "Back" };
-        var cancelButton = new Button { Text = "Cancel" };
+        var runButton = new Button { Text = primaryButtonText, IsDefault = true };
+        var backButton = new Button { Text = backButtonText };
         var dialog = new Dialog
         {
             Title = title,
@@ -1186,8 +1311,9 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
         buildBody(dialog);
+        dialog.DefaultAcceptView = runButton;
         var initialFocus = FindPreferredInitialFocus(dialog);
-        dialog.Buttons = [runButton, backButton, cancelButton];
+        dialog.Buttons = [runButton, backButton];
 
         OperationExecutionResult? result = null;
         runButton.Accepting += (_, args) =>
@@ -1217,31 +1343,32 @@ internal sealed class TerminalGuiRunner
             result = null;
             dialog.RequestStop();
         };
-        cancelButton.Accepting += (_, args) =>
-        {
-            args.Handled = true;
-            result = null;
-            dialog.RequestStop();
-        };
 
-        initialFocus?.SetFocus();
+        if (initialFocus is not null)
+        {
+            initialFocus.DefaultAcceptView = runButton;
+            initialFocus.SetFocus();
+        }
+        else
+        {
+            runButton.SetFocus();
+        }
         RequireApp().Run(dialog);
         dialog.Dispose();
         return result;
     }
 
-    private OperationExecutionResult? ShowServerDialog(string title, ServerConfig server, int height, Action<Dialog> buildBody, Func<OperationExecutionResult> submit)
-        => ShowFormDialog(title, 92, height, dialog =>
+    private OperationExecutionResult? ShowServerDialog(string title, ServerConfig server, int height, string primaryButtonText, Action<Dialog> buildBody, Func<OperationExecutionResult> submit)
+        => ShowFormDialog(title, 92, height, primaryButtonText, dialog =>
         {
             dialog.Add(new Label { X = 1, Y = 0, Text = $"Server: {server.ServerName}" });
             buildBody(dialog);
         }, submit);
 
-    private int ShowListDialog(string title, View content, string runButtonText)
+    private int ShowListDialog(string title, View content, string runButtonText, string backButtonText = "Back")
     {
         var primary = new Button { Text = runButtonText };
-        var back = new Button { Text = "Back" };
-        var cancel = new Button { Text = "Cancel" };
+        var back = new Button { Text = backButtonText };
         var dialog = new Dialog
         {
             Title = title,
@@ -1250,7 +1377,7 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
         dialog.Add(content);
-        dialog.Buttons = [primary, back, cancel];
+        dialog.Buttons = [primary, back];
 
         var result = 2;
         primary.Accepting += (_, args) =>
@@ -1263,12 +1390,6 @@ internal sealed class TerminalGuiRunner
         {
             args.Handled = true;
             result = 1;
-            dialog.RequestStop();
-        };
-        cancel.Accepting += (_, args) =>
-        {
-            args.Handled = true;
-            result = 2;
             dialog.RequestStop();
         };
 
@@ -1317,7 +1438,7 @@ internal sealed class TerminalGuiRunner
             .Select(row => $"{row.UserName} | {row.LoginName} | {row.Roles}")
             .ToList();
         var listView = CreateListView(items, 0);
-        var selection = ShowListDialog($"Users in {databaseName}", listView, "View");
+        var selection = ShowListDialog($"Users in {databaseName}", listView, "Open");
         if (selection != 0)
         {
             return;
@@ -1345,6 +1466,7 @@ internal sealed class TerminalGuiRunner
         ]);
 
         var showPasswordButton = new Button { Text = "Show Password" };
+        var versionHistoryButton = new Button { Text = "See Version History" };
         var closeButton = new Button { Text = "Close" };
         var dialog = new Dialog
         {
@@ -1366,7 +1488,7 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabStop
         };
         dialog.Add(textView);
-        dialog.Buttons = [showPasswordButton, closeButton];
+        dialog.Buttons = [showPasswordButton, versionHistoryButton, closeButton];
 
         showPasswordButton.Accepting += (_, args) =>
         {
@@ -1378,6 +1500,11 @@ internal sealed class TerminalGuiRunner
             }
 
             MessageBox.Query(RequireApp(), $"Password: {row.UserName}", trackedUser.Password, "OK");
+        };
+        versionHistoryButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            ShowVersionHistoryDialog($"User History: {row.UserName}", trackedUser?.VersionHistory ?? []);
         };
         closeButton.Accepting += (_, args) =>
         {
@@ -1393,6 +1520,197 @@ internal sealed class TerminalGuiRunner
     private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
         => $"{(SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer ? "Server" : "Host")}={server.ServerName};Database={databaseName};User={userName};Password=<PASSWORD_REQUIRED>;";
 
+    private void ShowDatabaseEntriesDialog(ServerConfig server, IReadOnlyList<string> databaseNames)
+    {
+        var orderedDatabaseNames = databaseNames.OrderBy(name => name, StringComparer.OrdinalIgnoreCase).ToList();
+        var items = orderedDatabaseNames
+            .Select(name =>
+            {
+                var database = server.Databases.FirstOrDefault(candidate => candidate.DatabaseName.Equals(name, StringComparison.OrdinalIgnoreCase));
+                return database is null
+                    ? $"{name} | users: <not tracked>"
+                    : $"{name} | users: {database.Users.Count}";
+            })
+            .ToList();
+        var listView = CreateListView(items, 0);
+        var selection = ShowListDialog($"Databases on {server.ServerName}", listView, "Open");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var selectedDatabaseName = orderedDatabaseNames[Math.Clamp(listView.SelectedItem ?? 0, 0, orderedDatabaseNames.Count - 1)];
+        ShowDatabaseEntryDialog(server, selectedDatabaseName);
+    }
+
+    private void ShowDatabaseEntryDialog(ServerConfig server, string databaseName)
+    {
+        var database = server.Databases.FirstOrDefault(candidate => candidate.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase));
+        var details = string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {databaseName}",
+            $"Tracked Users: {database?.Users.Count ?? 0}",
+            $"Users: {(database is null || database.Users.Count == 0 ? "<none>" : string.Join(", ", database.Users.Select(user => user.Username).OrderBy(name => name, StringComparer.OrdinalIgnoreCase)))}"
+        ]);
+
+        var versionHistoryButton = new Button { Text = "See Version History" };
+        var closeButton = new Button { Text = "Close" };
+        var dialog = new Dialog
+        {
+            Title = $"Database Entry: {databaseName}",
+            Width = 96,
+            Height = 16,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        var textView = new TextView
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(1),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = details,
+            TabStop = TabBehavior.TabStop
+        };
+        dialog.Add(textView);
+        dialog.Buttons = [versionHistoryButton, closeButton];
+
+        versionHistoryButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            ShowVersionHistoryDialog($"Database History: {databaseName}", database?.VersionHistory ?? []);
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+
+        textView.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
+    }
+
+    private void ShowTrashBinDialog()
+    {
+        if (_config.Trash.Count == 0)
+        {
+            MessageBox.Query(RequireApp(), "Trash Bin", "Trash is empty.", "OK");
+            return;
+        }
+
+        var orderedTrash = _config.Trash.OrderByDescending(entry => entry.DeletedAtUtc, StringComparer.OrdinalIgnoreCase).ToList();
+        var items = orderedTrash.Select(entry => $"{entry.EntryType} | {entry.DisplayName} | deleted {entry.DeletedAtUtc}").ToList();
+        var listView = CreateListView(items, 0);
+        var selection = ShowListDialog("Trash Bin", listView, "Open");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var entry = orderedTrash[Math.Clamp(listView.SelectedItem ?? 0, 0, orderedTrash.Count - 1)];
+        ShowTrashEntryDialog(entry);
+    }
+
+    private void ShowTrashEntryDialog(TrashEntry entry)
+    {
+        var details = string.Join(Environment.NewLine,
+        [
+            $"Type: {entry.EntryType}",
+            $"Name: {entry.DisplayName}",
+            $"Deleted: {entry.DeletedAtUtc}",
+            $"Server: {(string.IsNullOrWhiteSpace(entry.ParentServerName) ? "<none>" : entry.ParentServerName)}",
+            $"Database: {(string.IsNullOrWhiteSpace(entry.ParentDatabaseName) ? "<none>" : entry.ParentDatabaseName)}",
+            string.Empty,
+            entry.Details
+        ]);
+
+        var recoverButton = new Button { Text = "Recover" };
+        var versionHistoryButton = new Button { Text = "See Version History" };
+        var closeButton = new Button { Text = "Close" };
+        var dialog = new Dialog
+        {
+            Title = $"Trash Entry: {entry.DisplayName}",
+            Width = 96,
+            Height = 20,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        var textView = new TextView
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = Dim.Fill(1),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = details,
+            TabStop = TabBehavior.TabStop
+        };
+        dialog.Add(textView);
+        dialog.Buttons = [recoverButton, versionHistoryButton, closeButton];
+
+        recoverButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            var result = WaitForTaskCompletion(
+                _service.RestoreTrashItemAsync(_configPath, entry.TrashId, GetConfigEncryptionPassword(), _cancellationToken),
+                "Recover Trash Entry",
+                "Restoring entry from trash...");
+            ShowResult(result);
+            if (result.Succeeded)
+            {
+                dialog.RequestStop();
+                ReloadAndRefresh();
+            }
+        };
+        versionHistoryButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            ShowVersionHistoryDialog($"Trash History: {entry.DisplayName}", entry.VersionHistory);
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+
+        textView.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
+    }
+
+    private void ShowVersionHistoryDialog(string title, IReadOnlyList<EntryVersion> versionHistory)
+    {
+        if (versionHistory.Count == 0)
+        {
+            MessageBox.Query(RequireApp(), title, "No version history is available for this entry.", "OK");
+            return;
+        }
+
+        var orderedVersions = versionHistory.OrderByDescending(version => version.VersionNumber).ToList();
+        var items = orderedVersions.Select(version => $"v{version.VersionNumber} | {version.ChangedAtUtc} | {version.Summary}").ToList();
+        var listView = CreateListView(items, 0);
+        var selection = ShowListDialog(title, listView, "Open Version");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var version = orderedVersions[Math.Clamp(listView.SelectedItem ?? 0, 0, orderedVersions.Count - 1)];
+        ShowTextDialog($"{title}: v{version.VersionNumber}", string.Join(Environment.NewLine,
+        [
+            $"Version: {version.VersionNumber}",
+            $"Changed: {version.ChangedAtUtc}",
+            $"Summary: {version.Summary}",
+            string.Empty,
+            version.Details
+        ]));
+    }
+
     private string? PromptDatabaseName(ServerConfig server, string title)
     {
         var databaseNames = server.Databases
@@ -1403,7 +1721,7 @@ internal sealed class TerminalGuiRunner
             .ToList();
         if (databaseNames.Count == 0)
         {
-            return ShowInputDialog(title, "Database Name:");
+            return ShowInputDialog(title, "Database Name:", "OK");
         }
 
         var items = databaseNames.Append(ManualEntryChoice).ToList();
@@ -1416,7 +1734,7 @@ internal sealed class TerminalGuiRunner
 
         var selected = items[Math.Clamp(listView.SelectedItem ?? 0, 0, items.Count - 1)];
         return selected == ManualEntryChoice
-            ? ShowInputDialog(title, "Database Name:")
+            ? ShowInputDialog(title, "Database Name:", "OK")
             : selected;
     }
 
@@ -1430,7 +1748,7 @@ internal sealed class TerminalGuiRunner
             .ToList();
         if (userNames.Count == 0)
         {
-            return ShowInputDialog(title, "User Name:");
+            return ShowInputDialog(title, "User Name:", "OK");
         }
 
         var items = userNames.Append(ManualEntryChoice).ToList();
@@ -1443,17 +1761,16 @@ internal sealed class TerminalGuiRunner
 
         var selected = items[Math.Clamp(listView.SelectedItem ?? 0, 0, items.Count - 1)];
         return selected == ManualEntryChoice
-            ? ShowInputDialog(title, "User Name:")
+            ? ShowInputDialog(title, "User Name:", "OK")
             : selected;
     }
 
-    private string? ShowInputDialog(string title, string label)
+    private string? ShowInputDialog(string title, string label, string primaryButtonText, string backButtonText = "Back")
     {
         var field = CreateTextField();
         string? value = null;
-        var primary = new Button { Text = "Select" };
-        var back = new Button { Text = "Back" };
-        var cancel = new Button { Text = "Cancel" };
+        var primary = new Button { Text = primaryButtonText };
+        var back = new Button { Text = backButtonText };
         var dialog = new Dialog
         {
             Title = title,
@@ -1462,7 +1779,7 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
         AddField(dialog, 1, label, field);
-        dialog.Buttons = [primary, back, cancel];
+        dialog.Buttons = [primary, back];
 
         primary.Accepting += (_, args) =>
         {
@@ -1474,12 +1791,6 @@ internal sealed class TerminalGuiRunner
             });
         };
         back.Accepting += (_, args) =>
-        {
-            args.Handled = true;
-            value = null;
-            dialog.RequestStop();
-        };
-        cancel.Accepting += (_, args) =>
         {
             args.Handled = true;
             value = null;
@@ -1534,6 +1845,14 @@ internal sealed class TerminalGuiRunner
 
         return OperationExecutionResult.FromResult(result);
     }
+
+    private OperationExecutionResult ExecuteDatabaseSaveOperation(
+        Task<OperationResult> task,
+        string title = "Saving",
+        string message = "Saving changes to the database. Press Ctrl+C to cancel.",
+        string? newActiveServer = null,
+        bool selectServerAfterSuccess = false)
+        => ExecuteOperation(task, title, message, newActiveServer, selectServerAfterSuccess);
 
     private OperationExecutionResult ExecuteUserLookup(Task<OperationResult<IReadOnlyList<DatabaseUserRow>>> task)
     {
@@ -1690,6 +2009,41 @@ internal sealed class TerminalGuiRunner
 
     private IApplication RequireApp()
         => _app ?? throw new InvalidOperationException("Terminal.Gui application is not initialized.");
+
+    private void TryRequestApplicationExit()
+    {
+        if (!ConfirmExitApplication())
+        {
+            return;
+        }
+
+        _exitConfirmationApproved = true;
+        RequireApp().RequestStop();
+    }
+
+    private bool ConfirmExitApplication()
+        => MessageBox.Query(
+            RequireApp(),
+            "Exit SQL Manager",
+            "Are you sure you want to exit?",
+            "Stay",
+            "Exit") == 1;
+
+    private void OnMainWindowIsRunningChanging(object? sender, Terminal.Gui.App.CancelEventArgs<bool> args)
+    {
+        if (args.NewValue)
+        {
+            return;
+        }
+
+        if (_exitConfirmationApproved)
+        {
+            _exitConfirmationApproved = false;
+            return;
+        }
+
+        args.Cancel = !ConfirmExitApplication();
+    }
 
     private static string ResolveActiveServerName(SqlManagerConfig config)
     {

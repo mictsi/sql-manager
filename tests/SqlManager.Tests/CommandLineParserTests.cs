@@ -75,4 +75,18 @@ public sealed class CommandLineParserTests
         Assert.NotNull(result.Value);
         Assert.Equal(CommandKind.DisableConfigEncryption, result.Value!.Command);
     }
+
+    [Fact]
+    public void Parse_ReadsMigrateConfigEncryptionFormatCommandAndPassword()
+    {
+        var result = CommandLineParser.Parse(
+            ["migrate-config-encryption-format", "--config-path", "sql-config.json", "--encryption-password", "ComplexPass!123"],
+            "fallback.json");
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.Value);
+        Assert.Equal(CommandKind.MigrateConfigEncryptionFormat, result.Value!.Command);
+        Assert.Equal("ComplexPass!123", result.Value.Options.EncryptionPassword);
+        Assert.Equal("sql-config.json", result.Value.Options.ConfigPath);
+    }
 }

@@ -22,7 +22,8 @@ internal enum CommandKind
     RemoveUser,
     UpdatePassword,
     EnableConfigEncryption,
-    DisableConfigEncryption
+    DisableConfigEncryption,
+    MigrateConfigEncryptionFormat
 }
 
 internal enum RemovalScope
@@ -223,6 +224,7 @@ internal static class CommandLineParser
             "updatepassword" => CommandKind.UpdatePassword,
             "enableconfigencryption" or "encryptconfig" => CommandKind.EnableConfigEncryption,
             "disableconfigencryption" or "decryptconfig" => CommandKind.DisableConfigEncryption,
+            "migrateconfigencryptionformat" or "migrateencryptedconfigformat" or "migrateconfigencryption" => CommandKind.MigrateConfigEncryptionFormat,
             _ => null
         };
     }

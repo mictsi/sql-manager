@@ -25,7 +25,9 @@ internal sealed class ConfigStore
             return CreateDefaultConfig();
         }
 
-        var config = root["servers"] is not null
+        var config = root["encryptedPayload"] is not null
+            ? ParseEncryptedEnvelope(root)
+            : root["servers"] is not null
             ? ParseCurrent(root)
             : ParseLegacy(root);
 
@@ -43,8 +45,28 @@ internal sealed class ConfigStore
             Directory.CreateDirectory(directory);
         }
 
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(config, SerializerOptions), cancellationToken);
+        var json = config.EncryptPasswords && !string.IsNullOrWhiteSpace(config.EncryptedPayload)
+            ? JsonSerializer.Serialize(new EncryptedConfigEnvelope
+            {
+                EncryptPasswords = true,
+                EncryptionKey = config.EncryptionKey,
+                EncryptedPayload = config.EncryptedPayload
+            }, SerializerOptions)
+            : JsonSerializer.Serialize(config, SerializerOptions);
+
+        await File.WriteAllTextAsync(path, json, cancellationToken);
     }
+
+    internal static void NormalizeLoadedConfig(SqlManagerConfig config)
+        => Normalize(config);
+
+    private static SqlManagerConfig ParseEncryptedEnvelope(JsonNode root)
+        => new()
+        {
+            EncryptPasswords = root["encryptPasswords"]?.GetValue<bool>() ?? true,
+            EncryptionKey = root["encryptionKey"]?.GetValue<string>() ?? string.Empty,
+            EncryptedPayload = root["encryptedPayload"]?.GetValue<string>() ?? string.Empty
+        };
 
     private static SqlManagerConfig ParseCurrent(JsonNode root)
     {
@@ -57,7 +79,8 @@ internal sealed class ConfigStore
             {
                 ConnectionTimeoutSeconds = root["timeouts"]?["connectionTimeoutSeconds"]?.GetValue<int>() ?? SqlTimeoutConfig.DefaultConnectionTimeoutSeconds,
                 CommandTimeoutSeconds = root["timeouts"]?["commandTimeoutSeconds"]?.GetValue<int>() ?? SqlTimeoutConfig.DefaultCommandTimeoutSeconds
-            }
+            },
+            Trash = ParseTrash(root["trash"]?.AsArray())
         };
 
         foreach (var serverNode in root["servers"]?.AsArray() ?? [])
@@ -69,13 +92,16 @@ internal sealed class ConfigStore
 
             var server = new ServerConfig
             {
+                EntryId = serverNode["entryId"]?.GetValue<string>() ?? string.Empty,
                 ServerName = serverNode["serverName"]?.GetValue<string>() ?? string.Empty,
                 Provider = serverNode["provider"]?.GetValue<string>() ?? SqlProviders.SqlServer,
                 Port = serverNode["port"]?.GetValue<int?>(),
                 AdminDatabase = serverNode["adminDatabase"]?.GetValue<string>() ?? string.Empty,
                 AdminUsername = serverNode["adminUsername"]?.GetValue<string>() ?? string.Empty,
                 AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty,
-                Encrypted = serverNode["encrypted"]?.GetValue<bool>() ?? false
+                DatabasesPayload = serverNode["databasesPayload"]?.GetValue<string>() ?? string.Empty,
+                Encrypted = serverNode["encrypted"]?.GetValue<bool>() ?? false,
+                VersionHistory = ParseVersionHistory(serverNode["versionHistory"]?.AsArray())
             };
 
             foreach (var databaseNode in serverNode["databases"]?.AsArray() ?? [])
@@ -87,7 +113,9 @@ internal sealed class ConfigStore
 
                 var database = new DatabaseConfig
                 {
-                    DatabaseName = databaseNode["databaseName"]?.GetValue<string>() ?? string.Empty
+                    EntryId = databaseNode["entryId"]?.GetValue<string>() ?? string.Empty,
+                    DatabaseName = databaseNode["databaseName"]?.GetValue<string>() ?? string.Empty,
+                    VersionHistory = ParseVersionHistory(databaseNode["versionHistory"]?.AsArray())
                 };
 
                 foreach (var userNode in databaseNode["users"]?.AsArray() ?? [])
@@ -99,11 +127,13 @@ internal sealed class ConfigStore
 
                     database.Users.Add(new UserConfig
                     {
+                        EntryId = userNode["entryId"]?.GetValue<string>() ?? string.Empty,
                         Username = userNode["username"]?.GetValue<string>() ?? string.Empty,
                         Password = userNode["password"]?.GetValue<string>() ?? string.Empty,
                         Encrypted = userNode["encrypted"]?.GetValue<bool>() ?? false,
                         ConnectionString = userNode["connectionString"]?.GetValue<string>() ?? string.Empty,
-                        Roles = userNode["roles"]?.AsArray().Select(role => role?.GetValue<string>() ?? string.Empty).Where(role => !string.IsNullOrWhiteSpace(role)).ToList() ?? []
+                        Roles = userNode["roles"]?.AsArray().Select(role => role?.GetValue<string>() ?? string.Empty).Where(role => !string.IsNullOrWhiteSpace(role)).ToList() ?? [],
+                        VersionHistory = ParseVersionHistory(userNode["versionHistory"]?.AsArray())
                     });
                 }
 
@@ -211,6 +241,56 @@ internal sealed class ConfigStore
 
     private static SqlManagerConfig CreateDefaultConfig() => new();
 
+    private static List<EntryVersion> ParseVersionHistory(JsonArray? historyNodes)
+    {
+        var versions = new List<EntryVersion>();
+        foreach (var node in historyNodes ?? [])
+        {
+            if (node is null)
+            {
+                continue;
+            }
+
+            versions.Add(new EntryVersion
+            {
+                VersionNumber = node["versionNumber"]?.GetValue<int>() ?? 0,
+                ChangedAtUtc = node["changedAtUtc"]?.GetValue<string>() ?? string.Empty,
+                Summary = node["summary"]?.GetValue<string>() ?? string.Empty,
+                Details = node["details"]?.GetValue<string>() ?? string.Empty
+            });
+        }
+
+        return versions;
+    }
+
+    private static List<TrashEntry> ParseTrash(JsonArray? trashNodes)
+    {
+        var trash = new List<TrashEntry>();
+        foreach (var node in trashNodes ?? [])
+        {
+            if (node is null)
+            {
+                continue;
+            }
+
+            trash.Add(new TrashEntry
+            {
+                TrashId = node["trashId"]?.GetValue<string>() ?? string.Empty,
+                EntryType = node["entryType"]?.GetValue<string>() ?? string.Empty,
+                EntryId = node["entryId"]?.GetValue<string>() ?? string.Empty,
+                DisplayName = node["displayName"]?.GetValue<string>() ?? string.Empty,
+                ParentServerName = node["parentServerName"]?.GetValue<string>() ?? string.Empty,
+                ParentDatabaseName = node["parentDatabaseName"]?.GetValue<string>() ?? string.Empty,
+                DeletedAtUtc = node["deletedAtUtc"]?.GetValue<string>() ?? string.Empty,
+                Details = node["details"]?.GetValue<string>() ?? string.Empty,
+                PayloadJson = node["payloadJson"]?.GetValue<string>() ?? string.Empty,
+                VersionHistory = ParseVersionHistory(node["versionHistory"]?.AsArray())
+            });
+        }
+
+        return trash;
+    }
+
     private static void Normalize(SqlManagerConfig config)
     {
         config.SelectedServerName ??= string.Empty;
@@ -227,9 +307,11 @@ internal sealed class ConfigStore
         }
 
         config.Servers ??= [];
+        config.Trash ??= [];
 
         foreach (var server in config.Servers)
         {
+            server.EntryId = string.IsNullOrWhiteSpace(server.EntryId) ? Guid.NewGuid().ToString("N") : server.EntryId;
             server.ServerName ??= string.Empty;
             server.Provider = SqlProviders.Normalize(server.Provider);
             if (server.Port is <= 0)
@@ -240,28 +322,142 @@ internal sealed class ConfigStore
             server.AdminDatabase ??= string.Empty;
             server.AdminUsername ??= string.Empty;
             server.AdminPassword ??= string.Empty;
+            server.DatabasesPayload ??= string.Empty;
             server.Encrypted = config.EncryptPasswords && server.Encrypted && !string.IsNullOrWhiteSpace(server.AdminPassword);
             server.Databases ??= [];
+            server.VersionHistory ??= [];
 
             foreach (var database in server.Databases)
             {
+                database.EntryId = string.IsNullOrWhiteSpace(database.EntryId) ? Guid.NewGuid().ToString("N") : database.EntryId;
                 database.DatabaseName ??= string.Empty;
                 database.Users ??= [];
+                database.VersionHistory ??= [];
 
                 foreach (var user in database.Users)
                 {
+                    user.EntryId = string.IsNullOrWhiteSpace(user.EntryId) ? Guid.NewGuid().ToString("N") : user.EntryId;
                     user.Username ??= string.Empty;
                     user.Password ??= string.Empty;
                     user.Encrypted = config.EncryptPasswords && user.Encrypted && !string.IsNullOrWhiteSpace(user.Password);
                     user.ConnectionString ??= string.Empty;
                     user.Roles ??= [];
+                    user.VersionHistory ??= [];
+
+                    EnsureUserHistory(server, database, user);
                 }
+
+                EnsureDatabaseHistory(server, database);
             }
+
+            EnsureServerHistory(server);
+        }
+
+        foreach (var trashEntry in config.Trash)
+        {
+            trashEntry.TrashId = string.IsNullOrWhiteSpace(trashEntry.TrashId) ? Guid.NewGuid().ToString("N") : trashEntry.TrashId;
+            trashEntry.EntryId ??= string.Empty;
+            trashEntry.EntryType ??= string.Empty;
+            trashEntry.DisplayName ??= string.Empty;
+            trashEntry.ParentServerName ??= string.Empty;
+            trashEntry.ParentDatabaseName ??= string.Empty;
+            trashEntry.DeletedAtUtc ??= string.Empty;
+            trashEntry.Details ??= string.Empty;
+            trashEntry.PayloadJson ??= string.Empty;
+            trashEntry.VersionHistory ??= [];
         }
 
         if (!config.EncryptPasswords)
         {
             config.EncryptionKey = string.Empty;
         }
+    }
+
+    private static void EnsureServerHistory(ServerConfig server)
+    {
+        if (server.VersionHistory.Count > 0)
+        {
+            return;
+        }
+
+        server.VersionHistory.Add(new EntryVersion
+        {
+            VersionNumber = 1,
+            ChangedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            Summary = "Imported current state.",
+            Details = BuildServerDetails(server)
+        });
+    }
+
+    private static void EnsureDatabaseHistory(ServerConfig server, DatabaseConfig database)
+    {
+        if (database.VersionHistory.Count > 0)
+        {
+            return;
+        }
+
+        database.VersionHistory.Add(new EntryVersion
+        {
+            VersionNumber = 1,
+            ChangedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            Summary = "Imported current state.",
+            Details = BuildDatabaseDetails(server, database)
+        });
+    }
+
+    private static void EnsureUserHistory(ServerConfig server, DatabaseConfig database, UserConfig user)
+    {
+        if (user.VersionHistory.Count > 0)
+        {
+            return;
+        }
+
+        user.VersionHistory.Add(new EntryVersion
+        {
+            VersionNumber = 1,
+            ChangedAtUtc = DateTimeOffset.UtcNow.ToString("O"),
+            Summary = "Imported current state.",
+            Details = BuildUserDetails(server, database, user)
+        });
+    }
+
+    private static string BuildServerDetails(ServerConfig server)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Provider: {SqlProviders.GetDisplayName(server.Provider)}",
+            $"Port: {(server.Port?.ToString() ?? "<default>")}",
+            $"Admin Database: {server.AdminDatabase}",
+            $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
+            $"Password State: {(server.Encrypted ? "encrypted" : string.IsNullOrWhiteSpace(server.AdminPassword) ? "missing" : "saved")}",
+            $"Tracked Databases: {server.Databases.Count}",
+            $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"
+        ]);
+
+    private static string BuildDatabaseDetails(ServerConfig server, DatabaseConfig database)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {database.DatabaseName}",
+            $"Tracked Users: {database.Users.Count}",
+            $"Users: {(database.Users.Count == 0 ? "<none>" : string.Join(", ", database.Users.Select(user => user.Username).OrderBy(name => name, StringComparer.OrdinalIgnoreCase)))}"
+        ]);
+
+    private static string BuildUserDetails(ServerConfig server, DatabaseConfig database, UserConfig user)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {database.DatabaseName}",
+            $"User: {user.Username}",
+            $"Password State: {(user.Encrypted ? "encrypted" : string.IsNullOrWhiteSpace(user.Password) ? "missing" : "saved")}",
+            $"Roles: {(user.Roles.Count == 0 ? "<none>" : string.Join(", ", user.Roles))}",
+            $"Connection String: {user.ConnectionString}"
+        ]);
+
+    private sealed class EncryptedConfigEnvelope
+    {
+        public bool EncryptPasswords { get; set; }
+        public string EncryptionKey { get; set; } = string.Empty;
+        public string EncryptedPayload { get; set; } = string.Empty;
     }
 }

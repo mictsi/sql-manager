@@ -194,6 +194,8 @@ internal sealed class SqlManagerApplication
                 return await RenderSimpleResultAsync(_service.ConfigurePasswordEncryptionAsync(options.ConfigPath, true, RequireEncryptionPassword(options), cancellationToken));
             case CommandKind.DisableConfigEncryption:
                 return await RenderSimpleResultAsync(_service.ConfigurePasswordEncryptionAsync(options.ConfigPath, false, RequireEncryptionPassword(options), cancellationToken));
+            case CommandKind.MigrateConfigEncryptionFormat:
+                return await RenderSimpleResultAsync(_service.MigrateEncryptedConfigFormatAsync(options.ConfigPath, RequireEncryptionPassword(options), cancellationToken));
             default:
                 _ui.WriteError("Unsupported command.");
                 return 2;
@@ -222,6 +224,11 @@ internal sealed class SqlManagerApplication
             && options.Command is not CommandKind.Help and not CommandKind.Version and not CommandKind.Tui and not CommandKind.ViewConfig and not CommandKind.ShowDatabases and not CommandKind.ShowUsers and not CommandKind.EnableConfigEncryption;
 
         if (needsEncryptionPassword)
+        {
+            options.EncryptionPassword = _ui.PromptSecret("Config encryption password:");
+        }
+
+        if (options.Command == CommandKind.MigrateConfigEncryptionFormat && string.IsNullOrWhiteSpace(options.EncryptionPassword))
         {
             options.EncryptionPassword = _ui.PromptSecret("Config encryption password:");
         }
@@ -258,7 +265,7 @@ internal sealed class SqlManagerApplication
 
     private async Task TryHydrateStoredAdminCredentialsAsync(CommandOptions options, CancellationToken cancellationToken)
     {
-        if (options.Command is CommandKind.Help or CommandKind.Tui or CommandKind.ViewConfig or CommandKind.SelectServer or CommandKind.EnableConfigEncryption or CommandKind.DisableConfigEncryption)
+        if (options.Command is CommandKind.Help or CommandKind.Tui or CommandKind.ViewConfig or CommandKind.SelectServer or CommandKind.EnableConfigEncryption or CommandKind.DisableConfigEncryption or CommandKind.MigrateConfigEncryptionFormat)
         {
             return;
         }
