@@ -16,6 +16,7 @@ internal sealed class TerminalGuiRunner
     private readonly SqlManagerService _service;
     private readonly PasswordGenerator _passwordGenerator = new();
     private readonly ProtectedSessionSecret _configEncryptionPassword = new();
+    private readonly Dictionary<string, int> _gameHighScores = new(StringComparer.OrdinalIgnoreCase);
     private IApplication? _app;
     private CancellationToken _cancellationToken;
     private string _configPath = string.Empty;
@@ -100,10 +101,11 @@ internal sealed class TerminalGuiRunner
 
     private void BuildMainWindow(Window window)
     {
+        var menuBar = BuildMenuBar();
         _activeServerLabel = new Label
         {
             X = 1,
-            Y = 0,
+            Y = 1,
             Width = Dim.Fill(1),
             Text = string.Empty
         };
@@ -111,7 +113,7 @@ internal sealed class TerminalGuiRunner
         var instructionsLabel = new Label
         {
             X = 1,
-            Y = 1,
+            Y = 2,
             Width = Dim.Fill(1),
             Text = "Use Up/Down within a column, Left/Right across columns, Tab to cycle, and Enter to run the selected action."
         };
@@ -125,7 +127,7 @@ internal sealed class TerminalGuiRunner
             ("Select Active Server", (Action)ShowSelectServerDialog),
             ("Add Server", (Action)ShowAddServerDialog),
             ("Edit Server", (Action)ShowEditServerDialog),
-            ("Sync Server", (Action)ShowSyncServerDialog),
+            ("Sync Server Configuration", (Action)ShowSyncServerDialog),
             ("Show Databases", (Action)ShowDatabasesDialog),
             ("Create Database", (Action)ShowCreateDatabaseDialog),
             ("Remove Database", (Action)ShowRemoveDatabaseDialog)
@@ -140,22 +142,45 @@ internal sealed class TerminalGuiRunner
             ("Update Password", (Action)ShowUpdatePasswordDialog)
         };
 
-        var configurationActions = new (string Title, Action Action)[]
-        {
-            ("View Config", (Action)ShowConfigDialog),
-            ("Initialize Config", (Action)ShowInitializeConfigDialog),
-            ("Toggle Encrypt Passwords", (Action)ShowPasswordEncryptionDialog),
-            ("Trash Bin", (Action)ShowTrashBinDialog),
-            ("Refresh", (Action)ReloadAndRefresh),
-            ("Exit", (Action)TryRequestApplicationExit)
-        };
+        _mainMenuColumns.Add(AddMenuColumn(window, 0, "Server Management", 1, 4, Dim.Percent(50) - 2, serverActions));
+        _mainMenuColumns.Add(AddMenuColumn(window, 1, "User Management", Pos.Percent(50) + 1, 4, Dim.Fill(2), userActions));
 
-        _mainMenuColumns.Add(AddMenuColumn(window, 0, "Server Management", 1, 3, Dim.Percent(33) - 2, serverActions));
-        _mainMenuColumns.Add(AddMenuColumn(window, 1, "User Management", Pos.Percent(33) + 1, 3, Dim.Percent(33) - 2, userActions));
-        _mainMenuColumns.Add(AddMenuColumn(window, 2, "Configuration", Pos.Percent(66) + 1, 3, Dim.Fill(2), configurationActions));
-
-        window.Add(_activeServerLabel, instructionsLabel);
+        window.Add(menuBar, _activeServerLabel, instructionsLabel);
     }
+
+    private MenuBar BuildMenuBar()
+        => new([
+            new MenuBarItem("_File", new PopoverMenu([
+                new MenuItem("_Save", "Ctrl+S", SaveCurrentConfig, Key.S.WithCtrl),
+                new MenuItem("E_xit", "Ctrl+Q", TryRequestApplicationExit, Key.Q.WithCtrl)
+            ])),
+            new MenuBarItem("_Configuration", new PopoverMenu([
+                new MenuItem("_View Config", string.Empty, ShowConfigDialog, default),
+                new MenuItem("_Initialize Config", string.Empty, ShowInitializeConfigDialog, default),
+                new MenuItem("_Toggle Encrypt Passwords", string.Empty, ShowPasswordEncryptionDialog, default),
+                new MenuItem("_Trash Bin", string.Empty, ShowTrashBinDialog, default),
+                new MenuItem("_Refresh", string.Empty, ReloadAndRefresh, default)
+            ])),
+            new MenuBarItem("_Games", new PopoverMenu([
+                new MenuItem("_Snake", string.Empty, ShowSnakeGameDialog, default),
+                new MenuItem("_Pong", string.Empty, ShowPongGameDialog, default),
+                new MenuItem("_Tetris", string.Empty, ShowTetrisGameDialog, default)
+            ])),
+            new MenuBarItem("_Help", new PopoverMenu([
+                new MenuItem("_Version", string.Empty, ShowVersionDialog, default),
+                new MenuItem("_Help Overview", string.Empty, ShowHelpOverviewDialog, default),
+                new MenuItem("_Command Reference", string.Empty, ShowCommandReferenceDialog, default)
+            ])),
+            new MenuBarItem("_About", new PopoverMenu([
+                new MenuItem("_About SQL Manager", string.Empty, ShowAboutDialog, default)
+            ]))
+        ])
+        {
+            X = 0,
+            Y = 0,
+            Width = Dim.Fill(),
+            Height = 1
+        };
 
     private List<Button> AddMenuColumn(Window window, int columnIndex, string title, Pos x, int topY, Dim width, IReadOnlyList<(string Title, Action Action)> actions)
     {
@@ -285,6 +310,21 @@ internal sealed class TerminalGuiRunner
         RefreshViews();
     }
 
+    private void SaveCurrentConfig()
+    {
+        var result = WaitForTaskCompletion(
+            _service.SaveConfigAsync(_configPath, GetConfigEncryptionPassword(), _cancellationToken),
+            "Save Configuration",
+            "Saving configuration...");
+
+        if (result.Succeeded)
+        {
+            ReloadAndRefresh();
+        }
+
+        ShowResult(result);
+    }
+
     private void ShowConfigDialog()
     {
         var lines = new List<string>
@@ -315,6 +355,552 @@ internal sealed class TerminalGuiRunner
 
         ShowTextDialog("Config", string.Join(Environment.NewLine, lines));
     }
+
+    private void ShowAboutDialog()
+    {
+        var repoUrlField = new TextField
+        {
+            X = 1,
+            Y = 8,
+            Width = Dim.Fill(1),
+            Text = AppVersion.RepositoryUrl,
+            ReadOnly = true,
+            TabStop = TabBehavior.TabStop
+        };
+        var copyButton = new Button { Text = "Copy URL (Ctrl+C)" };
+        var closeButton = new Button { Text = "Close (Esc)" };
+        var dialog = new Dialog
+        {
+            Title = "About SQL Manager",
+            Width = 96,
+            Height = 17,
+            TabStop = TabBehavior.TabGroup
+        };
+        var textView = new TextView
+        {
+            X = 1,
+            Y = 0,
+            Width = Dim.Fill(1),
+            Height = 7,
+            ReadOnly = true,
+            WordWrap = true,
+            Text = BuildAboutSummaryText(),
+            TabStop = TabBehavior.NoStop
+        };
+        var repoUrlLabel = new Label
+        {
+            X = 1,
+            Y = 7,
+            Text = "GitHub Repository (selectable, Ctrl+C to copy):"
+        };
+
+        dialog.Add(textView, repoUrlLabel, repoUrlField);
+        dialog.Buttons = [copyButton, closeButton];
+
+        void CopyRepoUrl()
+        {
+            var clipboard = RequireApp().Clipboard;
+            if (clipboard is not null && clipboard.TrySetClipboardData(AppVersion.RepositoryUrl))
+            {
+                MessageBox.Query(RequireApp(), "About SQL Manager", "Repository URL copied to clipboard.", "OK");
+                return;
+            }
+
+            MessageBox.ErrorQuery(RequireApp(), "About SQL Manager", "Clipboard is not available. Select the URL field and copy it manually.", "OK");
+        }
+
+        copyButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            CopyRepoUrl();
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            dialog.RequestStop();
+        };
+        dialog.KeyDown += (_, key) =>
+        {
+            if (key == Key.Esc)
+            {
+                key.Handled = true;
+                dialog.RequestStop();
+            }
+        };
+        repoUrlField.KeyDown += (_, key) =>
+        {
+            if (key == Key.C.WithCtrl)
+            {
+                key.Handled = true;
+                CopyRepoUrl();
+            }
+        };
+
+        repoUrlField.SelectAll();
+        repoUrlField.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
+    }
+
+    private void ShowVersionDialog()
+        => ShowTextDialog("Version", HelpContent.BuildVersionText());
+
+    private void ShowSnakeGameDialog()
+    {
+        var game = new SnakeGame();
+        var scoreLabel = new Label
+        {
+            X = 1,
+            Y = 0,
+            Width = Dim.Fill(1),
+            Text = string.Empty
+        };
+        var controlsLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "Use Arrow keys or WASD to move. Press R to restart and Esc to close."
+        };
+        var boardView = new TextView
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = string.Empty,
+            TabStop = TabBehavior.TabStop
+        };
+        var restartButton = new Button { Text = "Restart (R)" };
+        var closeButton = new Button { Text = "Close (Esc)" };
+        var dialog = new Dialog
+        {
+            Title = "Snake",
+            Width = 38,
+            Height = 23,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        dialog.Add(scoreLabel, controlsLabel, boardView);
+        dialog.Buttons = [restartButton, closeButton];
+
+        var app = RequireApp();
+        var isRunning = true;
+
+        void RefreshSnakeView()
+        {
+            var highScore = RecordGameHighScore("Snake", game.Score);
+            scoreLabel.Text = game.IsGameOver
+                ? $"Score: {game.Score} | High: {highScore} | Game over"
+                : $"Score: {game.Score} | High: {highScore} | Length: {game.Segments.Count}";
+            boardView.Text = game.RenderBoard();
+        }
+
+        void RestartGame()
+        {
+            game.Reset();
+            RefreshSnakeView();
+            boardView.SetFocus();
+        }
+
+        bool HandleSnakeKey(Key key)
+        {
+            var normalized = key.NoCtrl.NoAlt.NoShift;
+            if (normalized == Key.Esc)
+            {
+                isRunning = false;
+                dialog.RequestStop();
+                return true;
+            }
+
+            if (normalized == Key.R)
+            {
+                RestartGame();
+                return true;
+            }
+
+            if (normalized == Key.CursorUp || normalized == Key.W)
+            {
+                game.ChangeDirection(SnakeDirection.Up);
+                return true;
+            }
+
+            if (normalized == Key.CursorDown || normalized == Key.S)
+            {
+                game.ChangeDirection(SnakeDirection.Down);
+                return true;
+            }
+
+            if (normalized == Key.CursorLeft || normalized == Key.A)
+            {
+                game.ChangeDirection(SnakeDirection.Left);
+                return true;
+            }
+
+            if (normalized == Key.CursorRight || normalized == Key.D)
+            {
+                game.ChangeDirection(SnakeDirection.Right);
+                return true;
+            }
+
+            return false;
+        }
+
+        void OnSnakeKeyDown(object? _, Key key)
+        {
+            if (HandleSnakeKey(key))
+            {
+                key.Handled = true;
+            }
+        }
+
+        var timerToken = app.AddTimeout(TimeSpan.FromMilliseconds(140), () =>
+        {
+            if (!isRunning)
+            {
+                return false;
+            }
+
+            game.Tick();
+            RefreshSnakeView();
+            return true;
+        });
+
+        restartButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RestartGame();
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            isRunning = false;
+            dialog.RequestStop();
+        };
+        dialog.KeyDown += OnSnakeKeyDown;
+        boardView.KeyDown += OnSnakeKeyDown;
+        restartButton.KeyDown += OnSnakeKeyDown;
+        closeButton.KeyDown += OnSnakeKeyDown;
+
+        RefreshSnakeView();
+        boardView.SetFocus();
+        app.Run(dialog);
+        isRunning = false;
+        if (timerToken is not null)
+        {
+            app.RemoveTimeout(timerToken);
+        }
+        dialog.Dispose();
+    }
+
+    private void ShowPongGameDialog()
+    {
+        var game = new PongGame();
+        var scoreLabel = new Label
+        {
+            X = 1,
+            Y = 0,
+            Width = Dim.Fill(1),
+            Text = string.Empty
+        };
+        var controlsLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "Use Up/Down or W/S. Press R to restart and Esc to close."
+        };
+        var boardView = new TextView
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = string.Empty,
+            TabStop = TabBehavior.TabStop
+        };
+        var restartButton = new Button { Text = "Restart (R)" };
+        var closeButton = new Button { Text = "Close (Esc)" };
+        var dialog = new Dialog
+        {
+            Title = "Pong",
+            Width = 42,
+            Height = 23,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        dialog.Add(scoreLabel, controlsLabel, boardView);
+        dialog.Buttons = [restartButton, closeButton];
+
+        var app = RequireApp();
+        var isRunning = true;
+
+        void RefreshPongView()
+        {
+            var highScore = RecordGameHighScore("Pong", game.Score);
+            scoreLabel.Text = game.IsGameOver
+                ? $"Score: {game.Score} | High: {highScore} | Game over"
+                : $"Score: {game.Score} | High: {highScore}";
+            boardView.Text = game.RenderBoard();
+        }
+
+        void RestartGame()
+        {
+            game.Reset();
+            RefreshPongView();
+            boardView.SetFocus();
+        }
+
+        bool HandlePongKey(Key key)
+        {
+            var normalized = key.NoCtrl.NoAlt.NoShift;
+            if (normalized == Key.Esc)
+            {
+                isRunning = false;
+                dialog.RequestStop();
+                return true;
+            }
+
+            if (normalized == Key.R)
+            {
+                RestartGame();
+                return true;
+            }
+
+            if (normalized == Key.CursorUp || normalized == Key.W)
+            {
+                game.MovePlayerUp();
+                RefreshPongView();
+                return true;
+            }
+
+            if (normalized == Key.CursorDown || normalized == Key.S)
+            {
+                game.MovePlayerDown();
+                RefreshPongView();
+                return true;
+            }
+
+            return false;
+        }
+
+        void OnPongKeyDown(object? _, Key key)
+        {
+            if (HandlePongKey(key))
+            {
+                key.Handled = true;
+            }
+        }
+
+        var timerToken = app.AddTimeout(TimeSpan.FromMilliseconds(110), () =>
+        {
+            if (!isRunning)
+            {
+                return false;
+            }
+
+            game.Tick();
+            RefreshPongView();
+            return true;
+        });
+
+        restartButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RestartGame();
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            isRunning = false;
+            dialog.RequestStop();
+        };
+        dialog.KeyDown += OnPongKeyDown;
+        boardView.KeyDown += OnPongKeyDown;
+        restartButton.KeyDown += OnPongKeyDown;
+        closeButton.KeyDown += OnPongKeyDown;
+
+        RefreshPongView();
+        boardView.SetFocus();
+        app.Run(dialog);
+        isRunning = false;
+        if (timerToken is not null)
+        {
+            app.RemoveTimeout(timerToken);
+        }
+        dialog.Dispose();
+    }
+
+    private void ShowTetrisGameDialog()
+    {
+        var game = new TetrisGame();
+        var scoreLabel = new Label
+        {
+            X = 1,
+            Y = 0,
+            Width = Dim.Fill(1),
+            Text = string.Empty
+        };
+        var controlsLabel = new Label
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill(1),
+            Text = "Use Arrow keys or WASD. Up/W rotate, Space hard drop, R restart, Esc close."
+        };
+        var boardView = new TextView
+        {
+            X = 1,
+            Y = 2,
+            Width = Dim.Fill(1),
+            Height = Dim.Fill(3),
+            ReadOnly = true,
+            WordWrap = false,
+            Text = string.Empty,
+            TabStop = TabBehavior.TabStop
+        };
+        var restartButton = new Button { Text = "Restart (R)" };
+        var closeButton = new Button { Text = "Close (Esc)" };
+        var dialog = new Dialog
+        {
+            Title = "Tetris",
+            Width = 32,
+            Height = 28,
+            TabStop = TabBehavior.TabGroup
+        };
+
+        dialog.Add(scoreLabel, controlsLabel, boardView);
+        dialog.Buttons = [restartButton, closeButton];
+
+        var app = RequireApp();
+        var isRunning = true;
+
+        void RefreshTetrisView()
+        {
+            var highScore = RecordGameHighScore("Tetris", game.Score);
+            scoreLabel.Text = game.IsGameOver
+                ? $"Score: {game.Score} | High: {highScore} | Lines: {game.LinesCleared} | Game over"
+                : $"Score: {game.Score} | High: {highScore} | Lines: {game.LinesCleared}";
+            boardView.Text = game.RenderBoard();
+        }
+
+        void RestartGame()
+        {
+            game.Reset();
+            RefreshTetrisView();
+            boardView.SetFocus();
+        }
+
+        bool HandleTetrisKey(Key key)
+        {
+            var normalized = key.NoCtrl.NoAlt.NoShift;
+            if (normalized == Key.Esc)
+            {
+                isRunning = false;
+                dialog.RequestStop();
+                return true;
+            }
+
+            if (normalized == Key.R)
+            {
+                RestartGame();
+                return true;
+            }
+
+            if (normalized == Key.CursorLeft || normalized == Key.A)
+            {
+                game.MoveLeft();
+                RefreshTetrisView();
+                return true;
+            }
+
+            if (normalized == Key.CursorRight || normalized == Key.D)
+            {
+                game.MoveRight();
+                RefreshTetrisView();
+                return true;
+            }
+
+            if (normalized == Key.CursorUp || normalized == Key.W)
+            {
+                game.RotateClockwise();
+                RefreshTetrisView();
+                return true;
+            }
+
+            if (normalized == Key.CursorDown || normalized == Key.S)
+            {
+                game.SoftDrop();
+                RefreshTetrisView();
+                return true;
+            }
+
+            if (normalized == Key.Space)
+            {
+                game.HardDrop();
+                RefreshTetrisView();
+                return true;
+            }
+
+            return false;
+        }
+
+        void OnTetrisKeyDown(object? _, Key key)
+        {
+            if (HandleTetrisKey(key))
+            {
+                key.Handled = true;
+            }
+        }
+
+        var timerToken = app.AddTimeout(TimeSpan.FromMilliseconds(320), () =>
+        {
+            if (!isRunning)
+            {
+                return false;
+            }
+
+            game.Tick();
+            RefreshTetrisView();
+            return true;
+        });
+
+        restartButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RestartGame();
+        };
+        closeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            isRunning = false;
+            dialog.RequestStop();
+        };
+        dialog.KeyDown += OnTetrisKeyDown;
+        boardView.KeyDown += OnTetrisKeyDown;
+        restartButton.KeyDown += OnTetrisKeyDown;
+        closeButton.KeyDown += OnTetrisKeyDown;
+
+        RefreshTetrisView();
+        boardView.SetFocus();
+        app.Run(dialog);
+        isRunning = false;
+        if (timerToken is not null)
+        {
+            app.RemoveTimeout(timerToken);
+        }
+        dialog.Dispose();
+    }
+
+    private void ShowHelpOverviewDialog()
+        => ShowTextDialog("Help", HelpContent.BuildHelpOverviewText(_configPath));
+
+    private void ShowCommandReferenceDialog()
+        => ShowTextDialog("Command Reference", HelpContent.BuildCommandReferenceText(_configPath));
 
     private void ShowPasswordEncryptionDialog()
     {
@@ -789,7 +1375,7 @@ internal sealed class TerminalGuiRunner
         var adminUserField = CreateTextField(server.AdminUsername);
         var adminPasswordField = CreateSecretField(server.AdminPassword);
         var result = ShowServerDialog(
-            "Sync Server",
+            "Sync Server Configuration",
             server,
             12,
             "Sync",
@@ -807,8 +1393,8 @@ internal sealed class TerminalGuiRunner
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField)
                 }, _cancellationToken),
-                "Sync Server",
-                "Syncing databases and users from SQL Server. Press Ctrl+C to cancel."));
+                "Sync Server Configuration",
+                "Syncing tracked databases and users from the selected server. Press Ctrl+C to cancel."));
 
         if (result?.Result is not null)
         {
@@ -1433,6 +2019,17 @@ internal sealed class TerminalGuiRunner
         dialog.Dispose();
     }
 
+    private static string BuildAboutSummaryText()
+        => string.Join(Environment.NewLine,
+        [
+            "SQL Manager",
+            AppVersion.Description,
+            string.Empty,
+            $"Version: {AppVersion.DisplayVersion}",
+            $"Built: {AppVersion.BuildDate}",
+            AppVersion.Copyright
+        ]);
+
     private void ShowUserEntriesDialog(ServerConfig server, string databaseName, IReadOnlyList<DatabaseUserRow> rows)
     {
         var items = rows
@@ -2044,6 +2641,20 @@ internal sealed class TerminalGuiRunner
         }
 
         args.Cancel = !ConfirmExitApplication();
+    }
+
+    private int RecordGameHighScore(string gameName, int score)
+    {
+        if (_gameHighScores.TryGetValue(gameName, out var highScore))
+        {
+            if (score <= highScore)
+            {
+                return highScore;
+            }
+        }
+
+        _gameHighScores[gameName] = score;
+        return score;
     }
 
     private static string ResolveActiveServerName(SqlManagerConfig config)

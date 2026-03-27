@@ -335,31 +335,16 @@ internal sealed class TerminalUi
     {
         _console.MarkupLine($"[grey]sql-manager {Markup.Escape(AppVersion.DisplayVersion)}[/]");
         _console.Write(new Rule("Commands"));
-        WritePlainLine("  sql-manager version");
-        WritePlainLine("  sql-manager --version");
-        WritePlainLine("  sql-manager tui");
-        WritePlainLine("  sql-manager view-config --config-path <path>");
-        WritePlainLine("  sql-manager init-config --config-path <path> --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]");
-        WritePlainLine("  sql-manager add-server --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]");
-        WritePlainLine("  sql-manager select-server --server-name <server>");
-        WritePlainLine("  sql-manager sync-server --server-name <server> --admin-username <user> --admin-password <password>");
-        WritePlainLine("  sql-manager show-databases --admin-password <password>");
-        WritePlainLine("  sql-manager create-database --database-name <database> --admin-password <password>");
-        WritePlainLine("  sql-manager remove-database --database-name <database> --admin-password <password>");
-        WritePlainLine("  sql-manager create-user --database-name <database> --user-name <user> --roles db_owner --admin-password <password> [--new-user-password <password>]");
-        WritePlainLine("  sql-manager add-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>");
-        WritePlainLine("  sql-manager remove-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>");
-        WritePlainLine("  sql-manager show-users --database-name <database> --admin-password <password>");
-        WritePlainLine("  sql-manager remove-user --user-name <user> --database-name <database> [--database-name <database>] [--remove-server-login] --removal-scope Database|Server|Both --admin-password <password>");
-        WritePlainLine("  sql-manager update-password --user-name <user> --admin-password <password> [--new-user-password <password>]");
-        WritePlainLine("  sql-manager enable-config-encryption --config-path <path> [--encryption-password <password>]");
-        WritePlainLine("  sql-manager disable-config-encryption --config-path <path> [--encryption-password <password>]");
-        WritePlainLine("  sql-manager migrate-config-encryption-format --config-path <path> [--encryption-password <password>]");
-        WritePlainLine("  sql-manager help");
+        foreach (var commandLine in HelpContent.GetCommandLines())
+        {
+            WritePlainLine($"  {commandLine}");
+        }
+
         _console.MarkupLine($"[grey]Default config path: {Markup.Escape(defaultConfigPath)}[/]");
-        _console.MarkupLine("[grey]PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.[/]");
-        _console.MarkupLine("[grey]Generic roles are translated per provider: db_owner, db_datareader, db_datawriter.[/]");
-        _console.MarkupLine("[grey]Encrypted configs can be unlocked for CLI operations with --encryption-password <password>.[/]");
+        foreach (var noteLine in HelpContent.GetNoteLines())
+        {
+            _console.MarkupLine($"[grey]{Markup.Escape(noteLine)}[/]");
+        }
     }
 
     private static void WritePlainLine(string text)

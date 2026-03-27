@@ -14,13 +14,28 @@
     <PublishTrimmed>false</PublishTrimmed>
     <VersionPrefix>1.0</VersionPrefix>
     <BuildNumber Condition="'$(BuildNumber)' == ''">0</BuildNumber>
+    <BuildDate Condition="'$(BuildDate)' == ''">$([System.DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ'))</BuildDate>
     <Version Condition="'$(Version)' == ''">$(VersionPrefix).$(BuildNumber)</Version>
     <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+$'))">$(Version).0.0</FileVersion>
     <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+\.\d+$'))">$(Version).0</FileVersion>
     <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+\.\d+\.\d+$'))">$(Version)</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <Description>Manage SQL Server and PostgreSQL servers, databases, users, and configuration from a terminal UI or CLI.</Description>
+    <RepositoryUrl>https://github.com/mictsi/sql-manager</RepositoryUrl>
+    <Copyright>Copyright @mictsi</Copyright>
   </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>BuildDate</_Parameter1>
+      <_Parameter2>$(BuildDate)</_Parameter2>
+    </AssemblyAttribute>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>RepositoryUrl</_Parameter1>
+      <_Parameter2>$(RepositoryUrl)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />

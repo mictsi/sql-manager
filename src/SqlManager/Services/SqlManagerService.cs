@@ -265,6 +265,14 @@ internal sealed class SqlManagerService
             return OperationResult.Success($"Selected server '{serverName}'.");
         });
 
+    public Task<OperationResult> SaveConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var config = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
+            return OperationResult.Success($"Configuration saved to '{configPath}'.");
+        });
+
     public Task<OperationResult> SyncServerAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {

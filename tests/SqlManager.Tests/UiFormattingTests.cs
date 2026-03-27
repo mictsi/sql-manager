@@ -102,6 +102,38 @@ public sealed class UiFormattingTests
             line);
     }
 
+    [Fact]
+    public void BuildAboutSummaryText_IncludesCopyrightAndBuildLabel()
+    {
+        var aboutText = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildAboutSummaryText");
+
+        Assert.Contains("SQL Manager", aboutText);
+        Assert.Contains("Copyright @mictsi", aboutText);
+        Assert.Contains("Built:", aboutText);
+    }
+
+    [Fact]
+    public void HelpContent_CommandReference_IncludesHelpCommandAndDefaultPath()
+    {
+        var text = HelpContent.BuildCommandReferenceText("C:/temp/sql-config.json");
+
+        Assert.Contains("sql-manager help", text);
+        Assert.Contains("Default config path: C:/temp/sql-config.json", text);
+    }
+
+    [Fact]
+    public void HelpContent_HelpOverview_IncludesFileShortcuts()
+    {
+        var text = HelpContent.BuildHelpOverviewText("C:/temp/sql-config.json");
+
+        Assert.Contains("Ctrl+S", text);
+        Assert.Contains("Ctrl+Q", text);
+        Assert.Contains("Snake, Pong, and Tetris", text);
+        Assert.Contains("Help: open version details", text);
+    }
+
     private static T InvokePrivateStatic<T>(Type type, string methodName, params object?[] arguments)
     {
         var method = type.GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static);
