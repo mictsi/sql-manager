@@ -228,6 +228,12 @@ Use an explicit full version, for example to match a release tag exactly:
 .\build.ps1 -Target Prod -Runtime win-x64,linux-x64 -VersionOverride 1.0.0
 ```
 
+Use a separate informational version when you want the app to display build metadata such as a commit hash while keeping the numeric assembly version stable:
+
+```powershell
+.\build.ps1 -Target Prod -Runtime win-x64,linux-x64 -VersionOverride 1.0.0 -InformationalVersionOverride 1.0.0+abc1234
+```
+
 Published outputs are written to runtime-specific folders under:
 
 ```text
@@ -245,7 +251,9 @@ The workflow:
 - packages each runtime output as a `.zip` asset
 - creates or updates a GitHub release for the tag and uploads the packaged binaries
 
-The workflow uses the tag name directly as the release version. Tags must be numeric versions like:
+The workflow uses the tag name as the numeric release version and appends the short git commit hash to the app's informational version. A tag like `1.0.0` built from commit `abcdef1...` produces an app version of `1.0.0+abcdef1`.
+
+Tags must still be numeric versions like:
 
 ```text
 1.0.0

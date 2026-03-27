@@ -7,6 +7,8 @@ param(
 
     [string]$VersionOverride,
 
+    [string]$InformationalVersionOverride,
+
     [int]$BuildNumber,
 
     [switch]$Clean
@@ -21,6 +23,7 @@ $artifactsRoot = Join-Path $repoRoot 'artifacts'
 $buildNumberPath = Join-Path $repoRoot 'build-number.txt'
 $versionPrefix = '1.0'
 $explicitVersionProvided = $PSBoundParameters.ContainsKey('VersionOverride')
+$explicitInformationalVersionProvided = $PSBoundParameters.ContainsKey('InformationalVersionOverride')
 $explicitBuildNumberProvided = $PSBoundParameters.ContainsKey('BuildNumber')
 
 if ($explicitVersionProvided -and $explicitBuildNumberProvided) {
@@ -83,6 +86,18 @@ function Resolve-Version {
     return "$versionPrefix.$script:BuildNumber"
 }
 
+function Resolve-InformationalVersion {
+    if ($explicitInformationalVersionProvided) {
+        if ([string]::IsNullOrWhiteSpace($InformationalVersionOverride)) {
+            throw 'InformationalVersionOverride cannot be empty.'
+        }
+
+        return $InformationalVersionOverride
+    }
+
+    return $script:Version
+}
+
 function Get-NormalizedVersion {
     param(
         [Parameter(Mandatory = $true)]
@@ -114,6 +129,7 @@ if (-not $explicitVersionProvided) {
 }
 
 $script:Version = Resolve-Version
+$script:InformationalVersion = Resolve-InformationalVersion
 $script:NormalizedVersion = Get-NormalizedVersion -VersionText $script:Version
 $script:FileVersion = Get-FileVersionString -VersionObject $script:NormalizedVersion
 
@@ -121,6 +137,7 @@ if (-not $explicitVersionProvided) {
     Write-Host "Build number: $script:BuildNumber" -ForegroundColor Green
 }
 Write-Host "Version: $script:Version" -ForegroundColor Green
+Write-Host "Informational version: $script:InformationalVersion" -ForegroundColor Green
 
 function Invoke-DotNet {
     param(
@@ -131,7 +148,7 @@ function Invoke-DotNet {
     $versionArguments = @(
         "/p:Version=$script:Version",
         "/p:FileVersion=$script:FileVersion",
-        "/p:InformationalVersion=$script:Version"
+        "/p:InformationalVersion=$script:InformationalVersion"
     )
 
     if (-not $explicitVersionProvided) {
