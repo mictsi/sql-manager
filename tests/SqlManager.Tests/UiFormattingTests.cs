@@ -9,6 +9,8 @@ public sealed class UiFormattingTests
     {
         var server = new ServerConfig
         {
+            ServerIdentifier = "2",
+            DisplayName = "Postgres Admin",
             ServerName = "pg01.contoso.local",
             Provider = SqlProviders.PostgreSql,
             AdminUsername = "postgres"
@@ -18,9 +20,9 @@ public sealed class UiFormattingTests
             typeof(SqlManagerApplication),
             "BuildServerChoiceLabel",
             server,
-            "PG01.CONTOSO.LOCAL");
+            "2");
 
-        Assert.Equal("* pg01.contoso.local | provider: PostgreSQL | admin: postgres", label);
+        Assert.Equal("* Postgres Admin [2] | host: pg01.contoso.local | provider: PostgreSQL | admin: postgres", label);
     }
 
     [Fact]
@@ -28,6 +30,8 @@ public sealed class UiFormattingTests
     {
         var server = new ServerConfig
         {
+            ServerIdentifier = "7",
+            DisplayName = "Production SQL",
             ServerName = "sql01.contoso.local",
             Provider = SqlProviders.SqlServer,
             AdminUsername = string.Empty
@@ -39,7 +43,7 @@ public sealed class UiFormattingTests
             server,
             "another-server");
 
-        Assert.Equal("sql01.contoso.local | provider: SQL Server | admin: <none>", label);
+        Assert.Equal("Production SQL [7] | host: sql01.contoso.local | provider: SQL Server | admin: <none>", label);
     }
 
     [Fact]
@@ -47,6 +51,8 @@ public sealed class UiFormattingTests
     {
         var server = new ServerConfig
         {
+            ServerIdentifier = "2",
+            DisplayName = "Postgres Admin",
             ServerName = "pg01.contoso.local",
             Provider = SqlProviders.PostgreSql,
             AdminUsername = "postgres",
@@ -76,7 +82,7 @@ public sealed class UiFormattingTests
             server);
 
         Assert.Equal(
-            "pg01.contoso.local | provider: PostgreSQL | admin: postgres | password: saved | dbs: 2 | users: 3",
+            "Postgres Admin [2] | host: pg01.contoso.local | provider: PostgreSQL | admin: postgres | password: saved | dbs: 2 | users: 3",
             line);
     }
 
@@ -85,6 +91,8 @@ public sealed class UiFormattingTests
     {
         var server = new ServerConfig
         {
+            ServerIdentifier = "7",
+            DisplayName = "Production SQL",
             ServerName = "sql01.contoso.local",
             Provider = SqlProviders.SqlServer,
             AdminUsername = "sa",
@@ -98,8 +106,28 @@ public sealed class UiFormattingTests
             server);
 
         Assert.Equal(
-            "sql01.contoso.local | provider: SQL Server | admin: sa | password: encrypted | dbs: 0 | users: 0",
+            "Production SQL [7] | host: sql01.contoso.local | provider: SQL Server | admin: sa | password: encrypted | dbs: 0 | users: 0",
             line);
+    }
+
+    [Fact]
+    public void BuildServerEditorLabels_ReflectPostgreSqlDefaults()
+    {
+        Assert.Equal("Host:", TerminalGuiRunner.BuildServerEditorServerLabel(SqlProviders.PostgreSql));
+        Assert.Equal("Port (default 5432):", TerminalGuiRunner.BuildServerEditorPortLabel(SqlProviders.PostgreSql));
+        Assert.Equal("Admin Database (default postgres):", TerminalGuiRunner.BuildServerEditorAdminDatabaseLabel(SqlProviders.PostgreSql));
+        Assert.Equal("Admin User:", TerminalGuiRunner.BuildServerEditorAdminUserLabel(SqlProviders.PostgreSql));
+        Assert.Contains("postgres admin database", TerminalGuiRunner.BuildServerEditorProviderHint(SqlProviders.PostgreSql), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildServerEditorLabels_ReflectSqlServerDefaults()
+    {
+        Assert.Equal("Server / Instance:", TerminalGuiRunner.BuildServerEditorServerLabel(SqlProviders.SqlServer));
+        Assert.Equal("Port (default 1433):", TerminalGuiRunner.BuildServerEditorPortLabel(SqlProviders.SqlServer));
+        Assert.Equal("Admin Database (default master):", TerminalGuiRunner.BuildServerEditorAdminDatabaseLabel(SqlProviders.SqlServer));
+        Assert.Equal("Admin Login:", TerminalGuiRunner.BuildServerEditorAdminUserLabel(SqlProviders.SqlServer));
+        Assert.Contains("master admin database", TerminalGuiRunner.BuildServerEditorProviderHint(SqlProviders.SqlServer), StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -125,7 +153,8 @@ public sealed class UiFormattingTests
         {
             ServerName = "azimondo.swedencentral.cloudapp.azure.com",
             Provider = SqlProviders.SqlServer,
-            Port = 1433
+            Port = 1433,
+            SqlServerTrustMode = SqlServerTrustModes.False
         };
 
         var preview = InvokePrivateStatic<string>(
@@ -136,7 +165,7 @@ public sealed class UiFormattingTests
             "securejournal");
 
         Assert.Equal(
-            "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Database=securejournal;Persist Security Info=False;User ID=securejournal;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;",
+            "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=securejournal;User ID=securejournal;Password=;Encrypt=True;TrustServerCertificate=False;",
             preview);
     }
 

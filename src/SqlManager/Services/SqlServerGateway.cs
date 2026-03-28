@@ -4,7 +4,7 @@ namespace SqlManager;
 
 internal sealed class SqlServerGateway
 {
-    public async Task ExecuteNonQueryAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task ExecuteNonQueryAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string trustMode, CancellationToken cancellationToken)
     {
         await ExecuteWithCommandAsync(
             server,
@@ -14,6 +14,7 @@ internal sealed class SqlServerGateway
             query,
             database,
             timeouts,
+            trustMode,
             async command =>
             {
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -22,7 +23,7 @@ internal sealed class SqlServerGateway
             cancellationToken);
     }
 
-    public async Task<int> ExecuteScalarIntAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<int> ExecuteScalarIntAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string trustMode, CancellationToken cancellationToken)
     {
         var result = await ExecuteWithCommandAsync(
             server,
@@ -32,12 +33,13 @@ internal sealed class SqlServerGateway
             query,
             database,
             timeouts,
+            trustMode,
             async command => await command.ExecuteScalarAsync(cancellationToken),
             cancellationToken);
         return Convert.ToInt32(result);
     }
 
-    public async Task<IReadOnlyList<string>> QueryNamesAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<string>> QueryNamesAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string trustMode, CancellationToken cancellationToken)
     {
         var results = new List<string>();
         await ExecuteWithCommandAsync(
@@ -48,6 +50,7 @@ internal sealed class SqlServerGateway
             query,
             database,
             timeouts,
+            trustMode,
             async command =>
             {
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -63,7 +66,7 @@ internal sealed class SqlServerGateway
         return results;
     }
 
-    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, SqlTimeoutConfig timeouts, string trustMode, CancellationToken cancellationToken)
     {
         const string query = """
 SELECT
@@ -96,6 +99,7 @@ ORDER BY dp.name;
             query,
             database,
             timeouts,
+            trustMode,
             async command =>
             {
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -122,12 +126,13 @@ ORDER BY dp.name;
         string query,
         string database,
         SqlTimeoutConfig timeouts,
+        string trustMode,
         Func<SqlCommand, Task<T>> execute,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var connection = new SqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds));
+        await using var connection = new SqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds, trustMode));
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         connectionCancellation.CancelAfter(TimeSpan.FromSeconds(timeouts.ConnectionTimeoutSeconds));
 
@@ -170,20 +175,19 @@ ORDER BY dp.name;
         }
     }
 
-    private static string BuildAdminConnectionString(string server, int? port, string username, string password, string database, int connectionTimeoutSeconds)
+    private static string BuildAdminConnectionString(string server, int? port, string username, string password, string database, int connectionTimeoutSeconds, string trustMode)
     {
         var builder = new SqlConnectionStringBuilder
         {
-            DataSource = port is > 0 ? $"{server},{port.Value}" : server,
+            DataSource = ServerConnectionOptions.BuildSqlServerDataSource(server, port),
             InitialCatalog = database,
             UserID = username,
             Password = password,
-            Encrypt = true,
-            TrustServerCertificate = true,
             ConnectTimeout = connectionTimeoutSeconds,
             ConnectRetryCount = 0,
             MultipleActiveResultSets = false
         };
+        SqlServerTrustModes.Apply(builder, trustMode);
 
         return builder.ConnectionString;
     }

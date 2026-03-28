@@ -96,12 +96,19 @@ internal sealed class ConfigStore
             var server = new ServerConfig
             {
                 EntryId = serverNode["entryId"]?.GetValue<string>() ?? string.Empty,
+                ServerIdentifier = serverNode["serverIdentifier"]?.GetValue<string>() ?? string.Empty,
+                DisplayName = serverNode["displayName"]?.GetValue<string>() ?? string.Empty,
                 ServerName = serverNode["serverName"]?.GetValue<string>() ?? string.Empty,
                 Provider = serverNode["provider"]?.GetValue<string>() ?? SqlProviders.SqlServer,
                 Port = serverNode["port"]?.GetValue<int?>(),
                 AdminDatabase = serverNode["adminDatabase"]?.GetValue<string>() ?? string.Empty,
                 AdminUsername = serverNode["adminUsername"]?.GetValue<string>() ?? string.Empty,
                 AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty,
+                PostgreSqlSslMode = serverNode["postgreSqlSslMode"]?.GetValue<string>() ?? string.Empty,
+                PostgreSqlPooling = serverNode["postgreSqlPooling"]?.GetValue<bool?>(),
+                SqlServerTrustMode = serverNode["sqlServerTrustMode"]?.GetValue<string>() ?? string.Empty,
+                ConnectionTimeoutSeconds = serverNode["connectionTimeoutSeconds"]?.GetValue<int?>(),
+                CommandTimeoutSeconds = serverNode["commandTimeoutSeconds"]?.GetValue<int?>(),
                 DatabasesPayload = serverNode["databasesPayload"]?.GetValue<string>() ?? string.Empty,
                 Encrypted = serverNode["encrypted"]?.GetValue<bool>() ?? false,
                 VersionHistory = ParseVersionHistory(serverNode["versionHistory"]?.AsArray())
@@ -187,6 +194,8 @@ internal sealed class ConfigStore
         {
             var server = new ServerConfig
             {
+                ServerIdentifier = group.Key,
+                DisplayName = group.Key,
                 ServerName = group.Key,
                 Provider = SqlProviders.SqlServer,
                 AdminUsername = legacyAdminUsername,
@@ -226,6 +235,8 @@ internal sealed class ConfigStore
         {
             config.Servers.Add(new ServerConfig
             {
+                ServerIdentifier = legacySelectedServer,
+                DisplayName = legacySelectedServer,
                 ServerName = legacySelectedServer,
                 Provider = SqlProviders.SqlServer,
                 AdminUsername = legacyAdminUsername,
@@ -313,9 +324,20 @@ internal sealed class ConfigStore
         config.Servers ??= [];
         config.Trash ??= [];
 
+        var desiredSelectedServer = config.SelectedServerName;
+        var usedIdentifiers = new HashSet<int>();
+        ServerConfig? selectedServer = null;
         foreach (var server in config.Servers)
         {
+            var existingIdentifier = server.ServerIdentifier;
             server.EntryId = string.IsNullOrWhiteSpace(server.EntryId) ? Guid.NewGuid().ToString("N") : server.EntryId;
+            server.ServerIdentifier = ServerConnections.NormalizeExistingIdentifier(existingIdentifier, usedIdentifiers);
+            if (selectedServer is null && ServerConnections.MatchesSelectionKey(desiredSelectedServer, existingIdentifier, server.ServerName))
+            {
+                selectedServer = server;
+            }
+
+            server.DisplayName = string.IsNullOrWhiteSpace(server.DisplayName) ? server.ServerName : server.DisplayName.Trim();
             server.ServerName ??= string.Empty;
             server.Provider = SqlProviders.Normalize(server.Provider);
             if (server.Port is <= 0)
@@ -326,6 +348,18 @@ internal sealed class ConfigStore
             server.AdminDatabase ??= string.Empty;
             server.AdminUsername ??= string.Empty;
             server.AdminPassword ??= string.Empty;
+            server.PostgreSqlSslMode = PostgreSqlSslModes.NormalizeConfigured(server.PostgreSqlSslMode);
+            server.SqlServerTrustMode = SqlServerTrustModes.NormalizeConfigured(server.SqlServerTrustMode);
+            if (server.ConnectionTimeoutSeconds is <= 0)
+            {
+                server.ConnectionTimeoutSeconds = null;
+            }
+
+            if (server.CommandTimeoutSeconds is <= 0)
+            {
+                server.CommandTimeoutSeconds = null;
+            }
+
             server.DatabasesPayload ??= string.Empty;
             server.Encrypted = config.EncryptPasswords && server.Encrypted && !string.IsNullOrWhiteSpace(server.AdminPassword);
             server.Databases ??= [];
@@ -356,6 +390,13 @@ internal sealed class ConfigStore
 
             EnsureServerHistory(server);
         }
+
+        selectedServer ??= ServerConnections.FindBySelectionKey(config.Servers, desiredSelectedServer);
+        config.SelectedServerName = selectedServer is not null
+            ? ServerConnections.GetIdentifier(selectedServer)
+            : config.Servers.Count == 1
+                ? ServerConnections.GetIdentifier(config.Servers[0])
+                : string.Empty;
 
         foreach (var trashEntry in config.Trash)
         {
@@ -428,11 +469,18 @@ internal sealed class ConfigStore
     private static string BuildServerDetails(ServerConfig server)
         => string.Join(Environment.NewLine,
         [
+            $"Connection Identifier: {ServerConnections.GetIdentifier(server)}",
+            $"Display Name: {ServerConnections.GetDisplayName(server)}",
             $"Server: {server.ServerName}",
             $"Provider: {SqlProviders.GetDisplayName(server.Provider)}",
             $"Port: {(server.Port?.ToString() ?? "<default>")}",
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
+            $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"Trust Server Certificate: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
+            $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
+            $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
+            $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
             $"Password State: {(server.Encrypted ? "encrypted" : string.IsNullOrWhiteSpace(server.AdminPassword) ? "missing" : "saved")}",
             $"Tracked Databases: {server.Databases.Count}",
             $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"

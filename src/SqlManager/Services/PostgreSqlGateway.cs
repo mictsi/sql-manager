@@ -4,7 +4,7 @@ namespace SqlManager;
 
 internal sealed class PostgreSqlGateway
 {
-    public async Task ExecuteNonQueryAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task ExecuteNonQueryAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string sslMode, bool pooling, CancellationToken cancellationToken)
     {
         await ExecuteWithCommandAsync(
             server,
@@ -14,6 +14,8 @@ internal sealed class PostgreSqlGateway
             query,
             database,
             timeouts,
+            sslMode,
+            pooling,
             async command =>
             {
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -22,7 +24,7 @@ internal sealed class PostgreSqlGateway
             cancellationToken);
     }
 
-    public async Task<int> ExecuteScalarIntAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<int> ExecuteScalarIntAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string sslMode, bool pooling, CancellationToken cancellationToken)
     {
         var result = await ExecuteWithCommandAsync(
             server,
@@ -32,12 +34,14 @@ internal sealed class PostgreSqlGateway
             query,
             database,
             timeouts,
+            sslMode,
+            pooling,
             async command => await command.ExecuteScalarAsync(cancellationToken),
             cancellationToken);
         return Convert.ToInt32(result);
     }
 
-    public async Task<IReadOnlyList<string>> QueryNamesAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<string>> QueryNamesAsync(string server, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, string sslMode, bool pooling, CancellationToken cancellationToken)
     {
         var results = new List<string>();
         await ExecuteWithCommandAsync(
@@ -48,6 +52,8 @@ internal sealed class PostgreSqlGateway
             query,
             database,
             timeouts,
+            sslMode,
+            pooling,
             async command =>
             {
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -63,7 +69,7 @@ internal sealed class PostgreSqlGateway
         return results;
     }
 
-    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, string query, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<DatabaseUserRow>> QueryDatabaseUsersAsync(string server, int? port, string username, string password, string database, string query, SqlTimeoutConfig timeouts, string sslMode, bool pooling, CancellationToken cancellationToken)
     {
         var rows = new List<DatabaseUserRow>();
         await ExecuteWithCommandAsync(
@@ -74,6 +80,8 @@ internal sealed class PostgreSqlGateway
             query,
             database,
             timeouts,
+            sslMode,
+            pooling,
             async command =>
             {
                 await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -100,12 +108,14 @@ internal sealed class PostgreSqlGateway
         string query,
         string database,
         SqlTimeoutConfig timeouts,
+        string sslMode,
+        bool pooling,
         Func<NpgsqlCommand, Task<T>> execute,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        await using var connection = new NpgsqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds));
+        await using var connection = new NpgsqlConnection(BuildAdminConnectionString(server, port, username, password, database, timeouts.ConnectionTimeoutSeconds, timeouts.CommandTimeoutSeconds, sslMode, pooling));
         using var connectionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         connectionCancellation.CancelAfter(TimeSpan.FromSeconds(timeouts.ConnectionTimeoutSeconds));
 
@@ -148,7 +158,7 @@ internal sealed class PostgreSqlGateway
         }
     }
 
-    private static string BuildAdminConnectionString(string server, int? port, string username, string password, string database, int connectionTimeoutSeconds)
+    private static string BuildAdminConnectionString(string server, int? port, string username, string password, string database, int connectionTimeoutSeconds, int commandTimeoutSeconds, string sslMode, bool pooling)
     {
         var builder = new NpgsqlConnectionStringBuilder
         {
@@ -156,9 +166,10 @@ internal sealed class PostgreSqlGateway
             Database = database,
             Username = username,
             Password = password,
-            SslMode = SslMode.Require,
+            SslMode = PostgreSqlSslModes.ToNpgsqlSslMode(sslMode),
             Timeout = connectionTimeoutSeconds,
-            CommandTimeout = 0
+            CommandTimeout = commandTimeoutSeconds,
+            Pooling = pooling
         };
 
         if (port is > 0)

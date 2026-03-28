@@ -318,7 +318,7 @@ internal sealed class TerminalGuiRunner
             return;
         }
 
-        _activeServerLabel.Text = $"Active server: {(string.IsNullOrWhiteSpace(_activeServer) ? "<none>" : _activeServer)}";
+        _activeServerLabel.Text = $"Active server: {GetActiveServerLabel()}";
     }
 
     private void ReloadAndRefresh()
@@ -336,7 +336,7 @@ internal sealed class TerminalGuiRunner
 
         _config = summary.Value;
         if (string.IsNullOrWhiteSpace(_activeServer)
-            || _config.Servers.All(server => !server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase)))
+            || ServerConnections.FindBySelectionKey(_config.Servers, _activeServer) is null)
         {
             _activeServer = ResolveActiveServerName(_config);
         }
@@ -366,7 +366,7 @@ internal sealed class TerminalGuiRunner
         var lines = new List<string>
         {
             $"Config Path: {_configPath}",
-            $"Selected Server: {(string.IsNullOrWhiteSpace(_config.SelectedServerName) ? "<none>" : _config.SelectedServerName)}",
+            $"Selected Server: {GetSelectedServerLabel(_config)}",
             $"Theme: {_config.ThemeName}",
             $"Password Encryption: {(_config.EncryptPasswords ? $"enabled ({(_configEncryptionPassword.HasValue ? "unlocked" : "locked")})" : "disabled")}",
             $"Connection Timeout: {_config.Timeouts.ConnectionTimeoutSeconds}s",
@@ -1209,7 +1209,7 @@ internal sealed class TerminalGuiRunner
         }
 
         var items = _config.Servers.Select(BuildServerLine).ToList();
-        var listView = CreateListView(items, Math.Max(0, _config.Servers.FindIndex(server => server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase))));
+        var listView = CreateListView(items, Math.Max(0, _config.Servers.FindIndex(server => ServerConnections.GetIdentifier(server).Equals(_activeServer, StringComparison.OrdinalIgnoreCase))));
 
         var selection = ShowListDialog("Select Active Server", listView, "Select");
         if (selection != 0)
@@ -1224,14 +1224,14 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.SelectServer,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
-                ServerName = selectedServer.ServerName
+                ServerIdentifier = ServerConnections.GetIdentifier(selectedServer)
             }, _cancellationToken),
             "Select Active Server",
             "Saving selected server...");
 
         if (result.Succeeded)
         {
-            _activeServer = selectedServer.ServerName;
+            _activeServer = ServerConnections.GetIdentifier(selectedServer);
             ReloadAndRefresh();
         }
 
@@ -1240,9 +1240,10 @@ internal sealed class TerminalGuiRunner
 
     private void ShowInitializeConfigDialog()
     {
-        var serverField = CreateTextField(_activeServer);
-        var adminUserField = CreateTextField(GetActiveServerConfig()?.AdminUsername);
-        var adminPasswordField = CreateSecretField(GetActiveServerConfig()?.AdminPassword);
+        var activeServerConfig = GetActiveServerConfig();
+        var serverField = CreateTextField(activeServerConfig?.ServerName);
+        var adminUserField = CreateTextField(activeServerConfig?.AdminUsername);
+        var adminPasswordField = CreateSecretField(activeServerConfig?.AdminPassword);
 
         var result = ShowFormDialog(
             "Initialize Config",
@@ -1287,7 +1288,7 @@ internal sealed class TerminalGuiRunner
         }
 
         var items = _config.Servers.Select(BuildServerLine).ToList();
-        var listView = CreateListView(items, Math.Max(0, _config.Servers.FindIndex(server => server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase))));
+        var listView = CreateListView(items, Math.Max(0, _config.Servers.FindIndex(server => ServerConnections.GetIdentifier(server).Equals(_activeServer, StringComparison.OrdinalIgnoreCase))));
         var selection = ShowListDialog("Edit Server", listView, "Edit");
         if (selection != 0)
         {
@@ -1301,80 +1302,312 @@ internal sealed class TerminalGuiRunner
     private void ShowServerEditorDialog(ServerConfig? existingServer)
     {
         var isEdit = existingServer is not null;
-        var activeConfig = existingServer ?? GetActiveServerConfig();
-        var serverField = CreateTextField(existingServer?.ServerName ?? _activeServer);
-        var providerField = CreateTextField(existingServer?.Provider ?? activeConfig?.Provider ?? SqlProviders.SqlServer);
-        var portField = CreateTextField(existingServer?.Port?.ToString() ?? activeConfig?.Port?.ToString());
-        var adminDatabaseField = CreateTextField(existingServer?.AdminDatabase ?? activeConfig?.AdminDatabase ?? string.Empty);
-        var adminUserField = CreateTextField(existingServer?.AdminUsername ?? activeConfig?.AdminUsername);
-        var adminPasswordField = CreateSecretField(existingServer?.AdminPassword ?? activeConfig?.AdminPassword);
+        var selectedProvider = SqlProviders.Normalize(existingServer?.Provider);
+        var identifierField = CreateTextField(existingServer is null
+            ? ServerConnections.GetNextIdentifier(_config.Servers)
+            : ServerConnections.GetIdentifier(existingServer));
+        var displayNameField = CreateTextField(existingServer is null ? string.Empty : ServerConnections.GetDisplayName(existingServer));
+        var serverField = CreateTextField(existingServer?.ServerName);
+        var portField = CreateTextField(existingServer?.Port?.ToString());
+        var adminDatabaseField = CreateTextField(string.IsNullOrWhiteSpace(existingServer?.AdminDatabase)
+            ? SqlProviders.GetDefaultAdminDatabase(selectedProvider)
+            : existingServer!.AdminDatabase);
+        var adminUserField = CreateTextField(existingServer?.AdminUsername);
+        var adminPasswordField = CreateSecretField(existingServer?.AdminPassword);
+        var connectionTimeoutField = CreateTextField(
+            existingServer?.ConnectionTimeoutSeconds?.ToString()
+            ?? SqlTimeoutConfig.DefaultConnectionTimeoutSeconds.ToString());
+        var commandTimeoutField = CreateTextField(
+            existingServer?.CommandTimeoutSeconds?.ToString()
+            ?? SqlTimeoutConfig.DefaultCommandTimeoutSeconds.ToString());
+        var poolingCheckBox = new CheckBox
+        {
+            X = 24,
+            Y = 19,
+            Text = "Enable connection pooling",
+            Value = ServerConnectionOptions.GetEffectivePostgreSqlPooling(existingServer?.PostgreSqlPooling)
+                ? CheckState.Checked
+                : CheckState.UnChecked,
+            TabStop = TabBehavior.TabStop
+        };
+        var selectedPostgreSqlSslMode = isEdit
+            ? PostgreSqlSslModes.GetEffective(existingServer?.PostgreSqlSslMode)
+            : PostgreSqlSslModes.GetDefaultForNewServers();
+        var selectedSqlServerTrustMode = isEdit
+            ? SqlServerTrustModes.GetEffective(existingServer?.SqlServerTrustMode)
+            : SqlServerTrustModes.GetDefaultForNewServers();
+
+        var identifierLabel = new Label { X = 1, Y = 1, Text = "Connection Identifier:" };
+        var displayNameLabel = new Label { X = 1, Y = 3, Text = "Display Name:" };
+        var serverLabel = new Label { X = 1, Y = 5 };
+        var providerLabel = new Label { X = 1, Y = 7, Text = "Server Type:" };
+        var providerValueLabel = new Label { X = 24, Y = 7, Width = 20 };
+        var changeProviderButton = new Button
+        {
+            X = 46,
+            Y = 7,
+            Width = 11,
+            Text = "Choose",
+            TabStop = TabBehavior.TabStop
+        };
+        var portLabel = new Label { X = 1, Y = 9 };
+        var adminDatabaseLabel = new Label { X = 1, Y = 11 };
+        var adminUserLabel = new Label { X = 1, Y = 13 };
+        var securityModeLabel = new Label { X = 1, Y = 17 };
+        var securityModeValueLabel = new Label { X = 24, Y = 17, Width = 20 };
+        var changeSecurityModeButton = new Button
+        {
+            X = 46,
+            Y = 17,
+            Width = 11,
+            Text = "Choose",
+            TabStop = TabBehavior.TabStop
+        };
+        var connectionTimeoutLabel = new Label { X = 1, Y = 19 };
+        var commandTimeoutLabel = new Label { X = 1, Y = 21 };
+        var providerHintLabel = new Label
+        {
+            X = 1,
+            Y = 25,
+            Width = Dim.Fill(2),
+            Height = 2
+        };
 
         var saveButton = new Button { Text = isEdit ? "Save" : "Add" };
+        var testConnectionButton = new Button { Text = "Test Connection" };
         var showPasswordButton = new Button { Text = "Show Password" };
         var versionHistoryButton = new Button { Text = "See Version History" };
         var backButton = new Button { Text = "Back" };
         var dialog = new Dialog
         {
-            Title = isEdit ? $"Edit Server: {existingServer!.ServerName}" : "Add Server",
+            Title = isEdit ? $"Edit Server: {ServerConnections.GetSelectionDisplay(existingServer!)}" : "Add Server",
             Width = 88,
-            Height = 20,
+            Height = 32,
             TabStop = TabBehavior.TabGroup
         };
         ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
-        AddField(dialog, 1, "Server Name:", serverField);
-        AddField(dialog, 3, "Provider:", providerField);
-        AddField(dialog, 5, "Port:", portField);
-        AddField(dialog, 7, "Admin Database:", adminDatabaseField);
-        AddField(dialog, 9, "Admin User:", adminUserField);
-        AddField(dialog, 11, "Admin Password:", adminPasswordField);
+        identifierField.Y = 1;
+        ConfigureSelectableReadOnlyField(identifierField);
+        displayNameField.Y = 3;
+        serverField.Y = 5;
+        portField.Y = 9;
+        adminDatabaseField.Y = 11;
+        adminUserField.Y = 13;
+        adminPasswordField.Y = 15;
+        connectionTimeoutField.Y = 19;
+        commandTimeoutField.Y = 21;
+        poolingCheckBox.Y = 23;
+
+        dialog.Add(
+            identifierLabel,
+            identifierField,
+            displayNameLabel,
+            displayNameField,
+            serverLabel,
+            serverField,
+            providerLabel,
+            providerValueLabel,
+            changeProviderButton,
+            portLabel,
+            portField,
+            adminDatabaseLabel,
+            adminDatabaseField,
+            adminUserLabel,
+            adminUserField,
+            securityModeLabel,
+            securityModeValueLabel,
+            changeSecurityModeButton,
+            connectionTimeoutLabel,
+            connectionTimeoutField,
+            commandTimeoutLabel,
+            commandTimeoutField,
+            poolingCheckBox);
+        AddField(dialog, 15, "Admin Password:", adminPasswordField);
+        dialog.Add(providerHintLabel);
         dialog.Buttons = isEdit
-            ? [saveButton, showPasswordButton, versionHistoryButton, backButton]
-            : [saveButton, backButton];
+            ? [saveButton, testConnectionButton, showPasswordButton, versionHistoryButton, backButton]
+            : [saveButton, testConnectionButton, backButton];
+
+        CommandOptions BuildDraftServerOptions(bool requirePassword)
+        {
+            var adminUser = GetRequiredText(adminUserField, "Admin user is required.");
+            var provider = selectedProvider;
+            var command = new CommandOptions
+            {
+                Command = CommandKind.AddServer,
+                ConfigPath = _configPath,
+                EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = GetRequiredText(identifierField, "Connection identifier is required."),
+                DisplayName = GetRequiredText(displayNameField, "Display name is required."),
+                ServerName = GetRequiredText(serverField, "Server name is required."),
+                Provider = provider,
+                Port = ParseOptionalPort(portField),
+                AdminDatabase = GetText(adminDatabaseField),
+                AdminUsername = adminUser,
+                AdminPassword = requirePassword
+                    ? GetRequiredText(adminPasswordField, "Admin password is required to test the connection.")
+                    : GetText(adminPasswordField)
+            };
+
+            if (provider == SqlProviders.PostgreSql)
+            {
+                command.PostgreSqlSslMode = selectedPostgreSqlSslMode;
+                command.PostgreSqlPooling = poolingCheckBox.Value == CheckState.Checked;
+                command.ConnectionTimeoutSeconds = ParseOptionalPositiveInteger(connectionTimeoutField, "Connection timeout must be a positive integer.");
+                command.CommandTimeoutSeconds = ParseOptionalPositiveInteger(commandTimeoutField, "Command timeout must be a positive integer.");
+            }
+            else
+            {
+                command.SqlServerTrustMode = selectedSqlServerTrustMode;
+            }
+
+            return command;
+        }
+
+        void RefreshProviderFields()
+        {
+            serverLabel.Text = BuildServerEditorServerLabel(selectedProvider);
+            providerValueLabel.Text = SqlProviders.GetDisplayName(selectedProvider);
+            portLabel.Text = BuildServerEditorPortLabel(selectedProvider);
+            adminDatabaseLabel.Text = BuildServerEditorAdminDatabaseLabel(selectedProvider);
+            adminUserLabel.Text = BuildServerEditorAdminUserLabel(selectedProvider);
+            securityModeLabel.Text = selectedProvider == SqlProviders.PostgreSql
+                ? "SSL Mode:"
+                : "Encrypt / Trust:";
+            securityModeValueLabel.Text = selectedProvider == SqlProviders.PostgreSql
+                ? PostgreSqlSslModes.GetPickerDisplayName(selectedPostgreSqlSslMode)
+                : SqlServerTrustModes.GetPickerDisplayName(selectedSqlServerTrustMode);
+            var showPostgreSqlOptions = selectedProvider == SqlProviders.PostgreSql;
+            connectionTimeoutLabel.Text = "Timeout:";
+            commandTimeoutLabel.Text = "Command Timeout:";
+            connectionTimeoutLabel.Visible = showPostgreSqlOptions;
+            connectionTimeoutField.Visible = showPostgreSqlOptions;
+            commandTimeoutLabel.Visible = showPostgreSqlOptions;
+            commandTimeoutField.Visible = showPostgreSqlOptions;
+            poolingCheckBox.Visible = showPostgreSqlOptions;
+            providerHintLabel.Text = BuildServerEditorProviderHint(selectedProvider);
+        }
+
+        RefreshProviderFields();
 
         OperationExecutionResult? result = null;
+        changeProviderButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+
+            var providerItems = new[] { "SQL Server", "PostgreSQL" };
+            var providerListView = CreateListView(providerItems, selectedProvider == SqlProviders.PostgreSql ? 1 : 0);
+            var selection = ShowListDialog("Server Type", providerListView, "Select");
+            if (selection != 0)
+            {
+                return;
+            }
+
+            var previousProvider = selectedProvider;
+            selectedProvider = (providerListView.SelectedItem ?? 0) == 1
+                ? SqlProviders.PostgreSql
+                : SqlProviders.SqlServer;
+
+            if (!string.Equals(previousProvider, selectedProvider, StringComparison.OrdinalIgnoreCase))
+            {
+                var oldDefaultDatabase = SqlProviders.GetDefaultAdminDatabase(previousProvider);
+                if (string.IsNullOrWhiteSpace(GetText(adminDatabaseField))
+                    || GetText(adminDatabaseField).Equals(oldDefaultDatabase, StringComparison.OrdinalIgnoreCase))
+                {
+                    adminDatabaseField.Text = SqlProviders.GetDefaultAdminDatabase(selectedProvider);
+                }
+            }
+
+            RefreshProviderFields();
+        };
+        changeSecurityModeButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+
+            if (selectedProvider == SqlProviders.PostgreSql)
+            {
+                var items = PostgreSqlSslModes.Choices
+                    .Select(PostgreSqlSslModes.GetPickerDisplayName)
+                    .ToList();
+                var sslModeListView = CreateListView(items, Math.Max(0, PostgreSqlSslModes.Choices.IndexOf(selectedPostgreSqlSslMode)));
+                var selection = ShowListDialog("PostgreSQL SSL Mode", sslModeListView, "Select");
+                if (selection != 0)
+                {
+                    return;
+                }
+
+                selectedPostgreSqlSslMode = PostgreSqlSslModes.Choices[Math.Clamp(sslModeListView.SelectedItem ?? 0, 0, PostgreSqlSslModes.Choices.Count - 1)];
+            }
+            else
+            {
+                var items = SqlServerTrustModes.Choices
+                    .Select(SqlServerTrustModes.GetPickerDisplayName)
+                    .ToList();
+                var trustModeListView = CreateListView(items, Math.Max(0, SqlServerTrustModes.Choices.IndexOf(selectedSqlServerTrustMode)));
+                var selection = ShowListDialog("SQL Server Trust Mode", trustModeListView, "Select");
+                if (selection != 0)
+                {
+                    return;
+                }
+
+                selectedSqlServerTrustMode = SqlServerTrustModes.Choices[Math.Clamp(trustModeListView.SelectedItem ?? 0, 0, SqlServerTrustModes.Choices.Count - 1)];
+            }
+
+            RefreshProviderFields();
+        };
         saveButton.Accepting += (_, args) =>
         {
             args.Handled = true;
             RunGuardedUiAction(dialog.Title?.ToString() ?? "Server", () =>
             {
-                var serverName = GetRequiredText(serverField, "Server name is required.");
-                var adminUser = GetRequiredText(adminUserField, "Admin user is required.");
-                var provider = GetText(providerField);
-                var adminDatabase = GetText(adminDatabaseField);
-                var port = ParseOptionalPort(portField);
+                var draft = BuildDraftServerOptions(requirePassword: false);
+                var serverIdentifier = draft.ServerIdentifier!;
 
                 result = isEdit
                     ? ExecuteOperation(
                         _service.UpdateServerAsync(
                             _configPath,
-                            existingServer!.ServerName,
-                            serverName,
-                            provider,
-                            port,
-                            adminDatabase,
-                            adminUser,
-                            GetText(adminPasswordField),
+                            ServerConnections.GetIdentifier(existingServer!),
+                            draft.DisplayName!,
+                            draft.ServerName!,
+                            draft.Provider,
+                            draft.Port,
+                            draft.AdminDatabase,
+                            draft.AdminUsername!,
+                            draft.AdminPassword,
+                            draft.PostgreSqlSslMode,
+                            draft.PostgreSqlPooling,
+                            draft.SqlServerTrustMode,
+                            draft.ConnectionTimeoutSeconds,
+                            draft.CommandTimeoutSeconds,
                             GetConfigEncryptionPassword(),
                             _cancellationToken),
                         title: "Edit Server",
-                        newActiveServer: serverName,
+                        newActiveServer: serverIdentifier,
                         selectServerAfterSuccess: true)
                     : ExecuteOperation(
                         _service.AddServerAsync(new CommandOptions
                         {
                             Command = CommandKind.AddServer,
-                            ConfigPath = _configPath,
-                            EncryptionPassword = GetConfigEncryptionPassword(),
-                            ServerName = serverName,
-                            Provider = provider,
-                            Port = port,
-                            AdminDatabase = adminDatabase,
-                            AdminUsername = adminUser,
-                            AdminPassword = GetText(adminPasswordField)
+                            ConfigPath = draft.ConfigPath,
+                            EncryptionPassword = draft.EncryptionPassword,
+                            ServerIdentifier = draft.ServerIdentifier,
+                            DisplayName = draft.DisplayName,
+                            ServerName = draft.ServerName,
+                            Provider = draft.Provider,
+                            Port = draft.Port,
+                            AdminDatabase = draft.AdminDatabase,
+                            AdminUsername = draft.AdminUsername,
+                            AdminPassword = draft.AdminPassword,
+                            PostgreSqlSslMode = draft.PostgreSqlSslMode,
+                            PostgreSqlPooling = draft.PostgreSqlPooling,
+                            SqlServerTrustMode = draft.SqlServerTrustMode,
+                            ConnectionTimeoutSeconds = draft.ConnectionTimeoutSeconds,
+                            CommandTimeoutSeconds = draft.CommandTimeoutSeconds
                         }, _cancellationToken),
                         title: "Add Server",
-                        newActiveServer: serverName,
+                        newActiveServer: serverIdentifier,
                         selectServerAfterSuccess: true);
 
                 if (result is not null && !result.Succeeded && result.Result is not null)
@@ -1384,6 +1617,24 @@ internal sealed class TerminalGuiRunner
                 }
 
                 dialog.RequestStop();
+            });
+        };
+        testConnectionButton.Accepting += (_, args) =>
+        {
+            args.Handled = true;
+            RunGuardedUiAction("Test Connection", () =>
+            {
+                var draft = BuildDraftServerOptions(requirePassword: true);
+                var operation = WaitForTaskCompletion(
+                    _service.TestServerConnectionAsync(draft, _cancellationToken),
+                    "Test Connection",
+                    "Testing the server connection. Press Ctrl+C to cancel.");
+                if (operation.ExitCode == 130)
+                {
+                    _exitCode = 130;
+                }
+
+                ShowResult(operation);
             });
         };
         showPasswordButton.Accepting += (_, args) =>
@@ -1396,14 +1647,14 @@ internal sealed class TerminalGuiRunner
                 return;
             }
 
-            ShowTextDialog($"Password: {GetText(serverField)}", password);
+            ShowTextDialog($"Password: {GetText(displayNameField)}", password);
         };
         versionHistoryButton.Accepting += (_, args) =>
         {
             args.Handled = true;
             if (existingServer is not null)
             {
-                ShowVersionHistoryDialog($"Server History: {existingServer.ServerName}", existingServer.VersionHistory);
+                ShowVersionHistoryDialog($"Server History: {ServerConnections.GetSelectionDisplay(existingServer)}", existingServer.VersionHistory);
             }
         };
         backButton.Accepting += (_, args) =>
@@ -1447,6 +1698,7 @@ internal sealed class TerminalGuiRunner
                     Command = CommandKind.SyncServer,
                     ConfigPath = _configPath,
                     EncryptionPassword = GetConfigEncryptionPassword(),
+                    ServerIdentifier = ServerConnections.GetIdentifier(server),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField)
@@ -1486,6 +1738,7 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.CreateDatabase,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = ServerConnections.GetIdentifier(server),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -1514,6 +1767,7 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.ShowDatabases,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = ServerConnections.GetIdentifier(server),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField)
@@ -1571,6 +1825,7 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.RemoveDatabase,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = ServerConnections.GetIdentifier(server),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -1654,6 +1909,7 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.ShowUsers,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = ServerConnections.GetIdentifier(server),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -1723,6 +1979,7 @@ internal sealed class TerminalGuiRunner
                     Command = CommandKind.TestUserLogin,
                     ConfigPath = _configPath,
                     EncryptionPassword = GetConfigEncryptionPassword(),
+                    ServerIdentifier = ServerConnections.GetIdentifier(server),
                     ServerName = server.ServerName,
                     DatabaseName = databaseName,
                     UserName = userName,
@@ -1831,6 +2088,7 @@ internal sealed class TerminalGuiRunner
                     Command = CommandKind.RemoveUser,
                     ConfigPath = _configPath,
                     EncryptionPassword = GetConfigEncryptionPassword(),
+                    ServerIdentifier = ServerConnections.GetIdentifier(server),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -1882,6 +2140,7 @@ internal sealed class TerminalGuiRunner
                 Command = CommandKind.UpdatePassword,
                 ConfigPath = _configPath,
                 EncryptionPassword = GetConfigEncryptionPassword(),
+                ServerIdentifier = ServerConnections.GetIdentifier(server),
                 ServerName = server.ServerName,
                 AdminUsername = ResolveAdminUsername(server, adminUserField),
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -1903,6 +2162,7 @@ internal sealed class TerminalGuiRunner
         var passwordField = includePasswordField ? CreateSecretField() : null;
         var existingRoleLookup = BuildRoleLookup(server, fixedUserName);
         var roleRows = new List<DatabaseRoleRow>();
+        var supportsReadWriteRoles = SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer;
 
         var matrixViewportHeight = Math.Min(10, Math.Max(5, server.Databases.Count + 1));
         var dialogHeight = Math.Min(18 + matrixViewportHeight, 30);
@@ -1954,8 +2214,11 @@ internal sealed class TerminalGuiRunner
                 var matrixViewport = CreateScrollableViewport(matrixViewportHeight, server.Databases.Count + 2);
                 matrixViewport.Add(new Label { X = 1, Y = 0, Text = "Database" });
                 matrixViewport.Add(new Label { X = 30, Y = 0, Text = "Owner" });
-                matrixViewport.Add(new Label { X = 42, Y = 0, Text = "Reader" });
-                matrixViewport.Add(new Label { X = 55, Y = 0, Text = "Writer" });
+                if (supportsReadWriteRoles)
+                {
+                    matrixViewport.Add(new Label { X = 42, Y = 0, Text = "Reader" });
+                    matrixViewport.Add(new Label { X = 55, Y = 0, Text = "Writer" });
+                }
 
                 var rowY = 1;
                 foreach (var database in server.Databases.OrderBy(database => database.DatabaseName, StringComparer.OrdinalIgnoreCase))
@@ -1966,10 +2229,20 @@ internal sealed class TerminalGuiRunner
                     var row = new DatabaseRoleRow(
                         database.DatabaseName,
                         new CheckBox { X = 30, Y = rowY, Width = 3, Height = 1, Text = string.Empty, Value = roles.Contains("db_owner") ? CheckState.Checked : CheckState.UnChecked, TabStop = TabBehavior.TabStop },
-                        new CheckBox { X = 42, Y = rowY, Width = 3, Height = 1, Text = string.Empty, Value = roles.Contains("db_datareader") ? CheckState.Checked : CheckState.UnChecked, TabStop = TabBehavior.TabStop },
-                        new CheckBox { X = 55, Y = rowY, Width = 3, Height = 1, Text = string.Empty, Value = roles.Contains("db_datawriter") ? CheckState.Checked : CheckState.UnChecked, TabStop = TabBehavior.TabStop });
+                        supportsReadWriteRoles ? new CheckBox { X = 42, Y = rowY, Width = 3, Height = 1, Text = string.Empty, Value = roles.Contains("db_datareader") ? CheckState.Checked : CheckState.UnChecked, TabStop = TabBehavior.TabStop } : null,
+                        supportsReadWriteRoles ? new CheckBox { X = 55, Y = rowY, Width = 3, Height = 1, Text = string.Empty, Value = roles.Contains("db_datawriter") ? CheckState.Checked : CheckState.UnChecked, TabStop = TabBehavior.TabStop } : null);
                     matrixViewport.Add(new Label { X = 1, Y = rowY, Width = 27, Text = database.DatabaseName });
-                    matrixViewport.Add(row.OwnerCheckBox, row.ReaderCheckBox, row.WriterCheckBox);
+                    matrixViewport.Add(row.OwnerCheckBox);
+                    if (row.ReaderCheckBox is not null)
+                    {
+                        matrixViewport.Add(row.ReaderCheckBox);
+                    }
+
+                    if (row.WriterCheckBox is not null)
+                    {
+                        matrixViewport.Add(row.WriterCheckBox);
+                    }
+
                     roleRows.Add(row);
                     rowY++;
                 }
@@ -1991,6 +2264,7 @@ internal sealed class TerminalGuiRunner
                     Command = CommandKind.CreateUser,
                     ConfigPath = _configPath,
                     EncryptionPassword = GetConfigEncryptionPassword(),
+                    ServerIdentifier = ServerConnections.GetIdentifier(server),
                     ServerName = server.ServerName,
                     AdminUsername = ResolveAdminUsername(server, adminUserField),
                     AdminPassword = ResolveAdminPassword(server, adminPasswordField),
@@ -2075,7 +2349,7 @@ internal sealed class TerminalGuiRunner
     private OperationExecutionResult? ShowServerDialog(string title, ServerConfig server, int height, string primaryButtonText, Action<Dialog> buildBody, Func<OperationExecutionResult> submit)
         => ShowFormDialog(title, 92, height, primaryButtonText, dialog =>
         {
-            dialog.Add(new Label { X = 1, Y = 0, Text = $"Server: {server.ServerName}" });
+            dialog.Add(new Label { X = 1, Y = 0, Text = $"Connection: {ServerConnections.GetSelectionDisplay(server)} | Host: {server.ServerName}" });
             buildBody(dialog);
         }, submit);
 
@@ -2362,14 +2636,9 @@ internal sealed class TerminalGuiRunner
 
     private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
     {
-        if (SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer)
-        {
-            var target = BuildSqlServerConnectionTarget(server.ServerName, server.Port);
-            return $"Server={target};Database={databaseName};Persist Security Info=False;User ID={userName};Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;";
-        }
-
-        var portSegment = server.Port is > 0 ? $";Port={server.Port.Value}" : string.Empty;
-        return $"Host={server.ServerName}{portSegment};Database={databaseName};Username={userName};Password=<PASSWORD_REQUIRED>;Ssl Mode=Require;";
+        return SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer
+            ? ServerConnectionOptions.BuildSqlServerUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.SqlServerTrustMode)
+            : ServerConnectionOptions.BuildPostgreSqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.PostgreSqlSslMode, server.PostgreSqlPooling, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
     }
 
     private void ShowDatabaseEntriesDialog(ServerConfig server, IReadOnlyList<string> databaseNames)
@@ -2688,7 +2957,7 @@ internal sealed class TerminalGuiRunner
                             Command = CommandKind.SelectServer,
                             ConfigPath = _configPath,
                             EncryptionPassword = GetConfigEncryptionPassword(),
-                            ServerName = newActiveServer
+                            ServerIdentifier = newActiveServer
                         }, _cancellationToken),
                         "Select Server",
                         "Updating selected server...");
@@ -2862,7 +3131,19 @@ internal sealed class TerminalGuiRunner
     }
 
     private ServerConfig? GetActiveServerConfig()
-        => _config.Servers.FirstOrDefault(server => server.ServerName.Equals(_activeServer, StringComparison.OrdinalIgnoreCase));
+        => ServerConnections.FindBySelectionKey(_config.Servers, _activeServer);
+
+    private string GetActiveServerLabel()
+    {
+        var server = GetActiveServerConfig();
+        return server is null ? "<none>" : ServerConnections.GetSelectionDisplay(server);
+    }
+
+    private static string GetSelectedServerLabel(SqlManagerConfig config)
+    {
+        var server = ServerConnections.FindBySelectionKey(config.Servers, config.SelectedServerName);
+        return server is null ? "<none>" : ServerConnections.GetSelectionDisplay(server);
+    }
 
     private string? GetConfigEncryptionPassword()
         => _configEncryptionPassword.Reveal();
@@ -3030,15 +3311,36 @@ internal sealed class TerminalGuiRunner
             return config.SelectedServerName;
         }
 
-        return config.Servers.Count == 1 ? config.Servers[0].ServerName : string.Empty;
+        return config.Servers.Count == 1 ? ServerConnections.GetIdentifier(config.Servers[0]) : string.Empty;
     }
 
     private static string BuildServerLine(ServerConfig server)
     {
         var passwordState = BuildPasswordState(server.AdminPassword, server.Encrypted);
         var userCount = server.Databases.Sum(database => database.Users.Count);
-        return $"{server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)} | password: {passwordState} | dbs: {server.Databases.Count} | users: {userCount}";
+        return $"{ServerConnections.GetSelectionDisplay(server)} | host: {server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)} | password: {passwordState} | dbs: {server.Databases.Count} | users: {userCount}";
     }
+
+    internal static string BuildServerEditorServerLabel(string provider)
+        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
+            ? "Host:"
+            : "Server / Instance:";
+
+    internal static string BuildServerEditorPortLabel(string provider)
+        => $"Port (default {SqlProviders.GetDefaultPort(provider)}):";
+
+    internal static string BuildServerEditorAdminDatabaseLabel(string provider)
+        => $"Admin Database (default {SqlProviders.GetDefaultAdminDatabase(provider)}):";
+
+    internal static string BuildServerEditorAdminUserLabel(string provider)
+        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
+            ? "Admin User:"
+            : "Admin Login:";
+
+    internal static string BuildServerEditorProviderHint(string provider)
+        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
+            ? "PostgreSQL: use the host name, connect through the postgres admin database, and choose SSL mode, timeouts, and pooling settings for the connection."
+            : "SQL Server: use a host or instance name, connect through the master admin database, and choose how Encrypt=True should handle TrustServerCertificate.";
 
     private static string BuildPasswordState(string? password, bool encrypted)
     {
@@ -3093,14 +3395,19 @@ internal sealed class TerminalGuiRunner
 
     private void AddPasswordFieldWithGenerateButton(Dialog dialog, int y, string label, TextField field, string title)
     {
-        AddField(dialog, y, label, field);
-        field.Width = 42;
+        const int buttonWidth = 14;
+
+        dialog.Add(new Label { X = 1, Y = y, Text = label });
+        field.X = 24;
+        field.Y = y;
+        field.Width = Dim.Fill(buttonWidth + 4);
+        dialog.Add(field);
 
         var generateButton = new Button
         {
-            X = Pos.Right(field) + 1,
+            X = Pos.AnchorEnd(buttonWidth + 2),
             Y = y,
-            Width = 12,
+            Width = buttonWidth,
             Text = "Generate",
             TabStop = TabBehavior.TabStop
         };
@@ -3174,24 +3481,7 @@ internal sealed class TerminalGuiRunner
             && view.TabStop is not null and not TabBehavior.NoStop;
 
     private static string BuildSqlServerConnectionTarget(string server, int? port)
-    {
-        var normalizedServer = server.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase)
-            ? server
-            : $"tcp:{server}";
-        if (port is > 0)
-        {
-            if (normalizedServer.Contains(',', StringComparison.Ordinal))
-            {
-                return normalizedServer;
-            }
-
-            return $"{normalizedServer},{port.Value}";
-        }
-
-        return normalizedServer.Contains(',', StringComparison.Ordinal)
-            ? normalizedServer
-            : $"{normalizedServer},1433";
-    }
+        => ServerConnectionOptions.BuildSqlServerDataSource(server, port);
 
     private static View CreateScrollableViewport(int viewportHeight, int contentHeight)
     {
@@ -3237,6 +3527,22 @@ internal sealed class TerminalGuiRunner
         }
 
         return port;
+    }
+
+    private static int? ParseOptionalPositiveInteger(TextField field, string error)
+    {
+        var text = GetText(field);
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(text, out var value) || value <= 0)
+        {
+            throw new UserInputException(error);
+        }
+
+        return value;
     }
 
     private static bool HasStoredAdminCredentials(ServerConfig server)
@@ -3291,7 +3597,7 @@ internal sealed class TerminalGuiRunner
             => new() { Succeeded = false, Result = result };
     }
 
-    private sealed record DatabaseRoleRow(string DatabaseName, CheckBox OwnerCheckBox, CheckBox ReaderCheckBox, CheckBox WriterCheckBox)
+    private sealed record DatabaseRoleRow(string DatabaseName, CheckBox OwnerCheckBox, CheckBox? ReaderCheckBox, CheckBox? WriterCheckBox)
     {
         public DatabaseRoleAssignment ToAssignment()
         {
@@ -3301,12 +3607,12 @@ internal sealed class TerminalGuiRunner
                 roles.Add("db_owner");
             }
 
-            if (ReaderCheckBox.Value == CheckState.Checked)
+            if (ReaderCheckBox?.Value == CheckState.Checked)
             {
                 roles.Add("db_datareader");
             }
 
-            if (WriterCheckBox.Value == CheckState.Checked)
+            if (WriterCheckBox?.Value == CheckState.Checked)
             {
                 roles.Add("db_datawriter");
             }

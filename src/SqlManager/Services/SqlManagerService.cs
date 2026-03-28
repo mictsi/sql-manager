@@ -8,7 +8,8 @@ namespace SqlManager;
 
 internal sealed class SqlManagerService
 {
-    private static readonly string[] SupportedRoles = ["db_owner", "db_datareader", "db_datawriter"];
+    private static readonly string[] SupportedSqlServerRoles = ["db_owner", "db_datareader", "db_datawriter"];
+    private static readonly string[] SupportedPostgreSqlRoles = ["db_owner"];
     private const string TrashEntryTypeServer = "server";
     private const string TrashEntryTypeDatabase = "database";
     private const string TrashEntryTypeUser = "user";
@@ -111,16 +112,16 @@ internal sealed class SqlManagerService
                 case TrashEntryTypeServer:
                 {
                     var server = DeserializeTrashPayload<ServerConfig>(trashEntry);
-                    if (FindServer(config, server.ServerName) is not null)
+                    if (FindServer(config, ServerConnections.GetIdentifier(server)) is not null)
                     {
-                        throw new UserInputException($"Server '{server.ServerName}' already exists in the config.");
+                        throw new UserInputException($"Connection '{ServerConnections.GetIdentifier(server)}' already exists in the config.");
                     }
 
                     AddVersion(server.VersionHistory, "Recovered from trash.", BuildServerVersionDetails(server));
                     config.Servers.Add(server);
                     if (string.IsNullOrWhiteSpace(config.SelectedServerName))
                     {
-                        config.SelectedServerName = server.ServerName;
+                        config.SelectedServerName = ServerConnections.GetIdentifier(server);
                     }
 
                     break;
@@ -174,10 +175,19 @@ internal sealed class SqlManagerService
             var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
             if (!string.IsNullOrWhiteSpace(options.ServerName))
             {
-                var server = GetOrCreateServer(config, options.ServerName!, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
+                var server = GetOrCreateServer(
+                    config,
+                    options.ServerIdentifier,
+                    options.ServerName!,
+                    options.DisplayName,
+                    options.Provider,
+                    options.Port,
+                    options.AdminDatabase,
+                    options.AdminUsername,
+                    options.AdminPassword);
                 server.AdminUsername = options.AdminUsername ?? server.AdminUsername;
                 server.AdminPassword = options.AdminPassword ?? server.AdminPassword;
-                config.SelectedServerName = options.ServerName!;
+                config.SelectedServerName = ServerConnections.GetIdentifier(server);
             }
 
             await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
@@ -189,80 +199,113 @@ internal sealed class SqlManagerService
         {
             var serverName = Require(options.ServerName, "AddServer requires ServerName.");
             var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
-            var existingServer = FindServer(config, serverName);
-            var server = GetOrCreateServer(config, serverName, options.Provider, options.Port, options.AdminDatabase, options.AdminUsername, options.AdminPassword);
-            AddVersion(server.VersionHistory, existingServer is null ? "Server added." : "Server updated.", BuildServerVersionDetails(server));
+            var serverIdentifier = ServerConnections.GetNextIdentifier(config.Servers);
+
+            var server = GetOrCreateServer(
+                config,
+                serverIdentifier,
+                serverName,
+                options.DisplayName,
+                options.Provider,
+                options.Port,
+                options.AdminDatabase,
+                options.AdminUsername,
+                options.AdminPassword,
+                options.PostgreSqlSslMode,
+                options.PostgreSqlPooling,
+                options.SqlServerTrustMode,
+                options.ConnectionTimeoutSeconds,
+                options.CommandTimeoutSeconds);
+            AddVersion(server.VersionHistory, "Server added.", BuildServerVersionDetails(server));
             if (string.IsNullOrWhiteSpace(config.SelectedServerName))
             {
-                config.SelectedServerName = serverName;
+                config.SelectedServerName = ServerConnections.GetIdentifier(server);
             }
 
             await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
-            return OperationResult.Success($"Server '{serverName}' has been added to the config.");
+            return OperationResult.Success($"Connection '{ServerConnections.GetSelectionDisplay(server)}' has been added to the config.");
         });
 
     public Task<OperationResult> UpdateServerAsync(
         string configPath,
-        string existingServerName,
+        string existingServerIdentifier,
+        string displayName,
         string serverName,
         string? provider,
         int? port,
         string? adminDatabase,
         string adminUsername,
         string? adminPassword,
+        string? postgreSqlSslMode,
+        bool? postgreSqlPooling,
+        string? sqlServerTrustMode,
+        int? connectionTimeoutSeconds,
+        int? commandTimeoutSeconds,
         string? encryptionPassword,
         CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
-            var currentName = Require(existingServerName, "UpdateServer requires an existing server name.");
+            var currentName = Require(existingServerIdentifier, "UpdateServer requires an existing server identifier.");
             var newServerName = Require(serverName, "UpdateServer requires ServerName.");
             var newAdminUsername = Require(adminUsername, "UpdateServer requires AdminUsername.");
             var config = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
             var server = FindServer(config, currentName)
-                ?? throw new UserInputException($"Server '{currentName}' was not found in the config.");
-
-            if (!currentName.Equals(newServerName, StringComparison.OrdinalIgnoreCase)
-                && FindServer(config, newServerName) is not null)
-            {
-                throw new UserInputException($"Server '{newServerName}' already exists in the config.");
-            }
+                ?? throw new UserInputException($"Connection '{currentName}' was not found in the config.");
 
             var normalizedProvider = SqlProviders.Normalize(string.IsNullOrWhiteSpace(provider) ? server.Provider : provider);
             var normalizedAdminDatabase = string.IsNullOrWhiteSpace(adminDatabase)
                 ? SqlProviders.GetDefaultAdminDatabase(normalizedProvider)
                 : adminDatabase!;
 
+            server.ServerIdentifier = currentName;
+            server.DisplayName = string.IsNullOrWhiteSpace(displayName) ? newServerName : displayName.Trim();
             server.ServerName = newServerName;
             server.Provider = normalizedProvider;
             server.Port = port;
             server.AdminDatabase = normalizedAdminDatabase;
             server.AdminUsername = newAdminUsername;
             server.AdminPassword = adminPassword ?? string.Empty;
+            server.PostgreSqlSslMode = string.IsNullOrWhiteSpace(postgreSqlSslMode)
+                ? normalizedProvider == SqlProviders.PostgreSql
+                    ? PostgreSqlSslModes.GetDefaultForNewServers()
+                    : string.Empty
+                : PostgreSqlSslModes.Normalize(postgreSqlSslMode);
+            server.PostgreSqlPooling = normalizedProvider == SqlProviders.PostgreSql
+                ? postgreSqlPooling ?? true
+                : null;
+            server.SqlServerTrustMode = string.IsNullOrWhiteSpace(sqlServerTrustMode)
+                ? normalizedProvider == SqlProviders.SqlServer
+                    ? SqlServerTrustModes.GetDefaultForNewServers()
+                    : string.Empty
+                : SqlServerTrustModes.Normalize(sqlServerTrustMode);
+            server.ConnectionTimeoutSeconds = connectionTimeoutSeconds is > 0 ? connectionTimeoutSeconds : null;
+            server.CommandTimeoutSeconds = commandTimeoutSeconds is > 0 ? commandTimeoutSeconds : null;
             RefreshConnectionStrings(server);
             AddVersion(server.VersionHistory, "Server updated.", BuildServerVersionDetails(server));
 
             if (config.SelectedServerName.Equals(currentName, StringComparison.OrdinalIgnoreCase))
             {
-                config.SelectedServerName = newServerName;
+                config.SelectedServerName = ServerConnections.GetIdentifier(server);
             }
 
             await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
-            return OperationResult.Success($"Server '{currentName}' was updated.");
+            return OperationResult.Success($"Connection '{currentName}' was updated.");
         });
 
     public Task<OperationResult> SelectServerAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
-            var serverName = Require(options.ServerName, "SelectServer requires ServerName.");
+            var serverName = Require(options.ServerIdentifier ?? options.ServerName, "SelectServer requires a server identifier.");
             var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
-            if (FindServer(config, serverName) is null)
+            var server = FindServer(config, serverName);
+            if (server is null)
             {
-                throw new UserInputException($"Server '{serverName}' was not found in the config.");
+                throw new UserInputException($"Connection '{serverName}' was not found in the config.");
             }
 
-            config.SelectedServerName = serverName;
+            config.SelectedServerName = ServerConnections.GetIdentifier(server);
             await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
-            return OperationResult.Success($"Selected server '{serverName}'.");
+            return OperationResult.Success($"Selected connection '{ServerConnections.GetSelectionDisplay(server)}'.");
         });
 
     public Task<OperationResult> SaveConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
@@ -280,6 +323,23 @@ internal sealed class SqlManagerService
             config.ThemeName = TerminalThemeCatalog.NormalizeThemeName(themeName);
             await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
             return OperationResult.Success($"Theme set to '{config.ThemeName}'.");
+        });
+
+    public Task<OperationResult> TestServerConnectionAsync(CommandOptions options, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var context = await ResolveServerContextAsync(options, persistSelection: false, cancellationToken);
+            var adminPassword = Require(context.AdminPassword, "TestConnection requires AdminPassword.");
+            await ExecuteScalarIntAsync(
+                context,
+                adminPassword,
+                BuildServerConnectionTestQuery(context.Provider),
+                context.AdminDatabase,
+                cancellationToken);
+
+            return OperationResult.Success(
+                $"Connected to '{context.ServerName}'.",
+                $"Connection '{context.ServerDisplayName}' responded successfully using {SqlProviders.GetDisplayName(context.Provider)}.");
         });
 
     public Task<OperationResult> SyncServerAsync(CommandOptions options, CancellationToken cancellationToken)
@@ -307,7 +367,7 @@ internal sealed class SqlManagerService
                         Username = userRow.UserName,
                         Password = password,
                         Roles = SplitRoleList(userRow.Roles),
-                        ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userRow.UserName, password)
+                    ConnectionString = BuildConnectionString(context, databaseName, userRow.UserName, password)
                     });
                     userCount++;
                 }
@@ -315,11 +375,11 @@ internal sealed class SqlManagerService
                 synchronizedDatabases.Add(databaseConfig);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             serverConfig.Databases = synchronizedDatabases;
             serverConfig.AdminUsername = context.AdminUsername;
             serverConfig.AdminPassword = context.AdminPassword;
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
@@ -376,10 +436,10 @@ END
                 }
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             AddVersion(databaseConfig.VersionHistory, "Database added to config.", BuildDatabaseVersionDetails(serverConfig, databaseConfig));
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Database '{databaseName}' is ready on '{context.ServerName}'.");
@@ -419,9 +479,9 @@ END
                 await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             SoftDeleteDatabase(context.Config, serverConfig, databaseName, options.EncryptionPassword);
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Removed database '{databaseName}' from '{context.ServerName}'.");
@@ -455,14 +515,14 @@ END
             var membershipQuery = BuildRoleMembershipSyncQuery(context, databaseName, userName, roles, failIfUserMissing: false);
             await ExecuteNonQueryAsync(context, adminPassword, membershipQuery, databaseName, cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Password = resolvedPassword.Password;
             userConfig.Roles = roles.ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, resolvedPassword.Password);
+            userConfig.ConnectionString = BuildConnectionString(context, databaseName, userName, resolvedPassword.Password);
             AddVersion(userConfig.VersionHistory, "User created or updated.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
@@ -493,7 +553,7 @@ END
                 context.AdminDatabase,
                 cancellationToken) > 0;
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var knownPassword = GetStoredPasswordForUser(serverConfig, userName);
             var passwordForConfig = knownPassword;
             string passwordMessage;
@@ -548,11 +608,11 @@ END
                 var userConfig = GetOrCreateUser(databaseConfig, userName);
                 userConfig.Password = passwordForConfig;
                 userConfig.Roles = assignment.Roles.ToList();
-                userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, assignment.DatabaseName, userName, passwordForConfig);
+                    userConfig.ConnectionString = BuildConnectionString(context, assignment.DatabaseName, userName, passwordForConfig);
                 AddVersion(userConfig.VersionHistory, "User access updated.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
             }
 
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             var assignmentSummary = string.Join(", ",
@@ -581,13 +641,13 @@ END
             var query = BuildAddRolesQuery(context, databaseName, userName, roles);
             await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Concat(roles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
+            userConfig.ConnectionString = BuildConnectionString(context, databaseName, userName, userConfig.Password);
             AddVersion(userConfig.VersionHistory, $"Roles added: {string.Join(", ", roles)}.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Added role(s) '{string.Join(", ", roles)}' to '{userName}' on '{databaseName}'.");
@@ -609,13 +669,13 @@ END
             var query = BuildRemoveRolesQuery(context, databaseName, userName, roles);
             await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Except(roles, StringComparer.OrdinalIgnoreCase).ToList();
-            userConfig.ConnectionString = BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, userConfig.Password);
+            userConfig.ConnectionString = BuildConnectionString(context, databaseName, userName, userConfig.Password);
             AddVersion(userConfig.VersionHistory, $"Roles removed: {string.Join(", ", roles)}.", BuildUserVersionDetails(serverConfig, databaseConfig, userConfig));
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success($"Removed role(s) '{string.Join(", ", roles)}' from '{userName}' on '{databaseName}'.");
@@ -660,7 +720,7 @@ END
             return OperationResult.Success(
                 $"Validated login for '{userName}' on database '{databaseName}'.",
                 $"Provider: {SqlProviders.GetDisplayName(context.Provider)}",
-                $"Connection string: {BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, password)}");
+                $"Connection string: {BuildConnectionString(context, databaseName, userName, password)}");
         });
 
     public Task<OperationResult> RemoveUserAsync(CommandOptions options, CancellationToken cancellationToken)
@@ -681,7 +741,7 @@ END
                 await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, databaseName, cancellationToken);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
             if (selectedDatabases.Count > 0)
             {
                 SoftDeleteUsersFromConfigDatabases(context.Config, serverConfig, userName, selectedDatabases, options.EncryptionPassword);
@@ -693,7 +753,7 @@ END
                 await ExecuteNonQueryAsync(context, adminPassword, dropLoginQuery, context.AdminDatabase, cancellationToken);
             }
 
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             var scopeMessage = removeServerLogin
@@ -729,15 +789,15 @@ END
                 : options.NewUserPassword!;
             await EnsureServerLoginAsync(context, adminPassword, context.AdminDatabase, userName, newPassword, true, true, cancellationToken);
 
-            UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), context.Provider, context.ServerName, context.Port, userName, newPassword);
-            foreach (var database in GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword).Databases)
+            UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), userName, newPassword);
+            foreach (var database in GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword).Databases)
             {
                 foreach (var user in database.Users.Where(candidate => candidate.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)))
                 {
-                    AddVersion(user.VersionHistory, "Password updated.", BuildUserVersionDetails(GetOrCreateServer(context.Config, context.ServerName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), database, user));
+                    AddVersion(user.VersionHistory, "Password updated.", BuildUserVersionDetails(GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), database, user));
                 }
             }
-            context.Config.SelectedServerName = context.ServerName;
+            context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
 
             return OperationResult.Success(
@@ -762,6 +822,14 @@ END
         }
 
         var serverConfig = FindServer(config, serverName);
+        var serverIdentifier = serverConfig is null
+            ? (string.IsNullOrWhiteSpace(options.ServerIdentifier)
+                ? ServerConnections.GetNextIdentifier(config.Servers)
+                : options.ServerIdentifier!)
+            : ServerConnections.GetIdentifier(serverConfig);
+        var serverDisplayName = serverConfig is null
+            ? (string.IsNullOrWhiteSpace(options.DisplayName) ? serverName : options.DisplayName!)
+            : ServerConnections.GetDisplayName(serverConfig);
         var provider = SqlProviders.Normalize(options.Provider ?? serverConfig?.Provider);
         var port = options.Port ?? serverConfig?.Port;
         var adminDatabase = string.IsNullOrWhiteSpace(options.AdminDatabase)
@@ -777,6 +845,33 @@ END
         var adminPassword = string.IsNullOrWhiteSpace(options.AdminPassword)
             ? serverConfig?.AdminPassword
             : options.AdminPassword;
+        var postgreSqlSslMode = !string.IsNullOrWhiteSpace(options.PostgreSqlSslMode)
+            ? PostgreSqlSslModes.Normalize(options.PostgreSqlSslMode)
+            : serverConfig is null
+                ? PostgreSqlSslModes.GetDefaultForNewServers()
+                : PostgreSqlSslModes.GetEffective(serverConfig.PostgreSqlSslMode);
+        var postgreSqlPooling = options.PostgreSqlPooling
+            ?? serverConfig?.PostgreSqlPooling
+            ?? true;
+        var sqlServerTrustMode = !string.IsNullOrWhiteSpace(options.SqlServerTrustMode)
+            ? SqlServerTrustModes.Normalize(options.SqlServerTrustMode)
+            : serverConfig is null
+                ? SqlServerTrustModes.GetDefaultForNewServers()
+                : SqlServerTrustModes.GetEffective(serverConfig.SqlServerTrustMode);
+        var resolvedTimeouts = new SqlTimeoutConfig
+        {
+            ConnectionTimeoutSeconds = options.ConnectionTimeoutSeconds is > 0
+                ? options.ConnectionTimeoutSeconds.Value
+                : serverConfig?.ConnectionTimeoutSeconds is > 0
+                    ? serverConfig.ConnectionTimeoutSeconds.Value
+                    : config.Timeouts.ConnectionTimeoutSeconds,
+            CommandTimeoutSeconds = options.CommandTimeoutSeconds is > 0
+                ? options.CommandTimeoutSeconds.Value
+                : serverConfig?.CommandTimeoutSeconds is > 0
+                    ? serverConfig.CommandTimeoutSeconds.Value
+                    : config.Timeouts.CommandTimeoutSeconds
+        };
+
         if (requireAdminUsername && string.IsNullOrWhiteSpace(adminUsername))
         {
             throw new UserInputException("AdminUsername is required for this operation.");
@@ -784,7 +879,7 @@ END
 
         if (persistSelection)
         {
-            config.SelectedServerName = serverName;
+            config.SelectedServerName = serverIdentifier;
             if (serverConfig is not null)
             {
                 serverConfig.Provider = provider;
@@ -799,12 +894,51 @@ END
                 {
                     serverConfig.AdminPassword = options.AdminPassword!;
                 }
+
+                if (!string.IsNullOrWhiteSpace(options.PostgreSqlSslMode))
+                {
+                    serverConfig.PostgreSqlSslMode = postgreSqlSslMode;
+                }
+
+                if (options.PostgreSqlPooling.HasValue)
+                {
+                    serverConfig.PostgreSqlPooling = options.PostgreSqlPooling.Value;
+                }
+
+                if (!string.IsNullOrWhiteSpace(options.SqlServerTrustMode))
+                {
+                    serverConfig.SqlServerTrustMode = sqlServerTrustMode;
+                }
+
+                if (options.ConnectionTimeoutSeconds is > 0)
+                {
+                    serverConfig.ConnectionTimeoutSeconds = options.ConnectionTimeoutSeconds.Value;
+                }
+
+                if (options.CommandTimeoutSeconds is > 0)
+                {
+                    serverConfig.CommandTimeoutSeconds = options.CommandTimeoutSeconds.Value;
+                }
             }
 
             await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
         }
 
-        return new ResolvedServerContext(config, serverConfig, serverName, provider, port, adminDatabase!, adminUsername ?? string.Empty, adminPassword ?? string.Empty, config.Timeouts);
+        return new ResolvedServerContext(
+            config,
+            serverConfig,
+            serverIdentifier,
+            serverDisplayName,
+            serverName,
+            provider,
+            port,
+            adminDatabase!,
+            adminUsername ?? string.Empty,
+            adminPassword ?? string.Empty,
+            resolvedTimeouts,
+            postgreSqlSslMode,
+            postgreSqlPooling,
+            sqlServerTrustMode);
     }
 
     private async Task<SqlManagerConfig> LoadDisplayConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
@@ -926,12 +1060,19 @@ END
             Servers = source.Servers.Select(server => new ServerConfig
             {
                 EntryId = server.EntryId,
+                ServerIdentifier = server.ServerIdentifier,
+                DisplayName = server.DisplayName,
                 ServerName = server.ServerName,
                 Provider = server.Provider,
                 Port = server.Port,
                 AdminDatabase = server.AdminDatabase,
                 AdminUsername = server.AdminUsername,
                 AdminPassword = server.AdminPassword,
+                PostgreSqlSslMode = server.PostgreSqlSslMode,
+                PostgreSqlPooling = server.PostgreSqlPooling,
+                SqlServerTrustMode = server.SqlServerTrustMode,
+                ConnectionTimeoutSeconds = server.ConnectionTimeoutSeconds,
+                CommandTimeoutSeconds = server.CommandTimeoutSeconds,
                 DatabasesPayload = server.DatabasesPayload,
                 Encrypted = server.Encrypted,
                 VersionHistory = server.VersionHistory.Select(CloneVersion).ToList(),
@@ -1154,7 +1295,7 @@ END
         {
             foreach (var user in database.Users)
             {
-                user.ConnectionString = BuildConnectionString(server.Provider, server.ServerName, server.Port, database.DatabaseName, user.Username, user.Password);
+                user.ConnectionString = BuildConnectionString(server, database.DatabaseName, user.Username, user.Password);
             }
         }
     }
@@ -1280,12 +1421,12 @@ END
         }
 
         return config.Servers.Count == 1
-            ? config.Servers[0].ServerName
+            ? ServerConnections.GetIdentifier(config.Servers[0])
             : string.Empty;
     }
 
-    private static ServerConfig? FindServer(SqlManagerConfig config, string serverName)
-        => config.Servers.FirstOrDefault(server => server.ServerName.Equals(serverName, StringComparison.OrdinalIgnoreCase));
+    private static ServerConfig? FindServer(SqlManagerConfig config, string selectionKey)
+        => ServerConnections.FindBySelectionKey(config.Servers, selectionKey);
 
     private static void AddVersion(List<EntryVersion> versionHistory, string summary, string details)
     {
@@ -1302,11 +1443,18 @@ END
     private static string BuildServerVersionDetails(ServerConfig server)
         => string.Join(Environment.NewLine,
         [
+            $"Connection Identifier: {ServerConnections.GetIdentifier(server)}",
+            $"Display Name: {ServerConnections.GetDisplayName(server)}",
             $"Server: {server.ServerName}",
             $"Provider: {SqlProviders.GetDisplayName(server.Provider)}",
             $"Port: {(server.Port?.ToString() ?? "<default>")}",
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
+            $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"Trust Server Certificate: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
+            $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
+            $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
+            $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
             $"Password State: {BuildPasswordState(server.AdminPassword, server.Encrypted)}",
             $"Tracked Databases: {server.Databases.Count}",
             $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"
@@ -1339,35 +1487,123 @@ END
                 ? "missing"
                 : "saved";
 
-    private static ServerConfig GetOrCreateServer(SqlManagerConfig config, string serverName, string? provider, int? port, string? adminDatabase, string? adminUsername, string? adminPassword)
+    private static ServerConfig GetOrCreateServer(
+        SqlManagerConfig config,
+        string? serverIdentifier,
+        string serverName,
+        string? displayName,
+        string? provider,
+        int? port,
+        string? adminDatabase,
+        string? adminUsername,
+        string? adminPassword,
+        string? postgreSqlSslMode = null,
+        bool? postgreSqlPooling = null,
+        string? sqlServerTrustMode = null,
+        int? connectionTimeoutSeconds = null,
+        int? commandTimeoutSeconds = null)
     {
         var normalizedProvider = SqlProviders.Normalize(provider);
         var normalizedAdminDatabase = string.IsNullOrWhiteSpace(adminDatabase)
             ? SqlProviders.GetDefaultAdminDatabase(normalizedProvider)
             : adminDatabase!;
 
-        var server = FindServer(config, serverName);
+        var server = string.IsNullOrWhiteSpace(serverIdentifier)
+            ? null
+            : FindServer(config, serverIdentifier);
         if (server is null)
         {
+            var usedIdentifiers = new HashSet<int>(
+                config.Servers
+                    .Select(ServerConnections.GetIdentifier)
+                    .Where(identifier => ServerConnections.TryParseIdentifier(identifier, out _))
+                    .Select(identifier => int.Parse(identifier, System.Globalization.CultureInfo.InvariantCulture)));
             server = new ServerConfig
             {
+                ServerIdentifier = ServerConnections.ReserveIdentifier(serverIdentifier, usedIdentifiers),
+                DisplayName = string.IsNullOrWhiteSpace(displayName) ? serverName : displayName.Trim(),
                 ServerName = serverName,
                 Provider = normalizedProvider,
                 Port = port,
                 AdminDatabase = normalizedAdminDatabase,
                 AdminUsername = adminUsername ?? string.Empty,
-                AdminPassword = adminPassword ?? string.Empty
+                AdminPassword = adminPassword ?? string.Empty,
+                PostgreSqlSslMode = normalizedProvider == SqlProviders.PostgreSql
+                    ? string.IsNullOrWhiteSpace(postgreSqlSslMode)
+                        ? PostgreSqlSslModes.GetDefaultForNewServers()
+                        : PostgreSqlSslModes.Normalize(postgreSqlSslMode)
+                    : string.Empty,
+                PostgreSqlPooling = normalizedProvider == SqlProviders.PostgreSql
+                    ? postgreSqlPooling ?? true
+                    : null,
+                SqlServerTrustMode = normalizedProvider == SqlProviders.SqlServer
+                    ? string.IsNullOrWhiteSpace(sqlServerTrustMode)
+                        ? SqlServerTrustModes.GetDefaultForNewServers()
+                        : SqlServerTrustModes.Normalize(sqlServerTrustMode)
+                    : string.Empty,
+                ConnectionTimeoutSeconds = connectionTimeoutSeconds is > 0 ? connectionTimeoutSeconds : null,
+                CommandTimeoutSeconds = commandTimeoutSeconds is > 0 ? commandTimeoutSeconds : null
             };
             config.Servers.Add(server);
         }
         else
         {
+            server.ServerIdentifier = ServerConnections.GetIdentifier(server);
+            server.DisplayName = string.IsNullOrWhiteSpace(displayName) ? ServerConnections.GetDisplayName(server) : displayName.Trim();
             server.Provider = normalizedProvider;
+            server.ServerName = serverName;
             server.Port = port;
             server.AdminDatabase = normalizedAdminDatabase;
             if (!string.IsNullOrWhiteSpace(adminUsername))
             {
                 server.AdminUsername = adminUsername!;
+            }
+
+            if (!string.IsNullOrWhiteSpace(postgreSqlSslMode))
+            {
+                server.PostgreSqlSslMode = PostgreSqlSslModes.Normalize(postgreSqlSslMode);
+            }
+            else if (normalizedProvider == SqlProviders.PostgreSql && string.IsNullOrWhiteSpace(server.PostgreSqlSslMode))
+            {
+                server.PostgreSqlSslMode = PostgreSqlSslModes.GetDefaultForNewServers();
+            }
+
+            if (postgreSqlPooling.HasValue)
+            {
+                server.PostgreSqlPooling = postgreSqlPooling.Value;
+            }
+            else if (normalizedProvider == SqlProviders.PostgreSql && !server.PostgreSqlPooling.HasValue)
+            {
+                server.PostgreSqlPooling = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(sqlServerTrustMode))
+            {
+                server.SqlServerTrustMode = SqlServerTrustModes.Normalize(sqlServerTrustMode);
+            }
+            else if (normalizedProvider == SqlProviders.SqlServer && string.IsNullOrWhiteSpace(server.SqlServerTrustMode))
+            {
+                server.SqlServerTrustMode = SqlServerTrustModes.GetDefaultForNewServers();
+            }
+
+            if (connectionTimeoutSeconds is > 0)
+            {
+                server.ConnectionTimeoutSeconds = connectionTimeoutSeconds.Value;
+            }
+
+            if (commandTimeoutSeconds is > 0)
+            {
+                server.CommandTimeoutSeconds = commandTimeoutSeconds.Value;
+            }
+
+            if (normalizedProvider == SqlProviders.PostgreSql)
+            {
+                server.SqlServerTrustMode = string.Empty;
+            }
+            else
+            {
+                server.PostgreSqlSslMode = string.Empty;
+                server.PostgreSqlPooling = null;
             }
         }
 
@@ -1378,7 +1614,7 @@ END
 
         if (string.IsNullOrWhiteSpace(config.SelectedServerName))
         {
-            config.SelectedServerName = serverName;
+            config.SelectedServerName = ServerConnections.GetIdentifier(server);
         }
 
         return server;
@@ -1459,7 +1695,7 @@ END
         }
 
         AddVersion(database.VersionHistory, "Moved to trash.", BuildDatabaseVersionDetails(server, database));
-        config.Trash.Add(CreateTrashEntry(TrashEntryTypeDatabase, database.EntryId, database.DatabaseName, server.ServerName, string.Empty, BuildDatabaseVersionDetails(server, database), SerializeTrashPayload(database), database.VersionHistory));
+        config.Trash.Add(CreateTrashEntry(TrashEntryTypeDatabase, database.EntryId, database.DatabaseName, ServerConnections.GetIdentifier(server), string.Empty, BuildDatabaseVersionDetails(server, database), SerializeTrashPayload(database), database.VersionHistory));
         server.Databases = server.Databases.Where(candidate => !candidate.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase)).ToList();
     }
 
@@ -1478,7 +1714,7 @@ END
             foreach (var user in removedUsers)
             {
                 AddVersion(user.VersionHistory, "Moved to trash.", BuildUserVersionDetails(server, database, user));
-                config.Trash.Add(CreateTrashEntry(TrashEntryTypeUser, user.EntryId, user.Username, server.ServerName, database.DatabaseName, BuildUserVersionDetails(server, database, user), SerializeTrashPayload(user), user.VersionHistory));
+        config.Trash.Add(CreateTrashEntry(TrashEntryTypeUser, user.EntryId, user.Username, ServerConnections.GetIdentifier(server), database.DatabaseName, BuildUserVersionDetails(server, database, user), SerializeTrashPayload(user), user.VersionHistory));
             }
 
             database.Users = database.Users.Where(user => !user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)).ToList();
@@ -1499,14 +1735,14 @@ END
             VersionHistory = versionHistory.Select(CloneVersion).ToList()
         };
 
-    private static void UpdateUserPasswordInConfig(ServerConfig server, string provider, string serverName, int? port, string userName, string password)
+    private static void UpdateUserPasswordInConfig(ServerConfig server, string userName, string password)
     {
         foreach (var database in server.Databases)
         {
             foreach (var user in database.Users.Where(user => user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)))
             {
                 user.Password = password;
-                user.ConnectionString = BuildConnectionString(provider, serverName, port, database.DatabaseName, userName, password);
+                user.ConnectionString = BuildConnectionString(server, database.DatabaseName, userName, password);
             }
         }
     }
@@ -1558,11 +1794,11 @@ END
     {
         if (IsSqlServer(context.Provider))
         {
-            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+            await _sqlServerGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, context.SqlServerTrustMode, cancellationToken);
             return;
         }
 
-        await _postgreSqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+        await _postgreSqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, context.PostgreSqlSslMode, context.PostgreSqlPooling, cancellationToken);
     }
 
     private async Task<int> ExecuteScalarIntAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
@@ -1574,10 +1810,10 @@ END
     {
         if (IsSqlServer(provider))
         {
-            return await _sqlServerGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, cancellationToken);
+            return await _sqlServerGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, SqlServerTrustModes.GetDefaultForNewServers(), cancellationToken);
         }
 
-        return await _postgreSqlGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, cancellationToken);
+        return await _postgreSqlGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, PostgreSqlSslModes.GetDefaultForNewServers(), true, cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> LoadServerDatabaseNamesAsync(ResolvedServerContext context, string adminPassword, CancellationToken cancellationToken)
@@ -1592,6 +1828,7 @@ END
                 "SELECT name FROM sys.databases WHERE database_id > 4 AND state = 0 ORDER BY name;",
                 context.AdminDatabase,
                 context.Timeouts,
+                context.SqlServerTrustMode,
                 cancellationToken);
         }
 
@@ -1603,6 +1840,8 @@ END
             "SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn = true AND datname NOT IN ('postgres') ORDER BY datname;",
             context.AdminDatabase,
             context.Timeouts,
+            context.PostgreSqlSslMode,
+            context.PostgreSqlPooling,
             cancellationToken);
     }
 
@@ -1617,6 +1856,7 @@ END
                 adminPassword,
                 databaseName,
                 context.Timeouts,
+                context.SqlServerTrustMode,
                 cancellationToken);
         }
 
@@ -1628,6 +1868,8 @@ END
             databaseName,
             BuildPostgreSqlShowUsersQuery(databaseName),
             context.Timeouts,
+            context.PostgreSqlSslMode,
+            context.PostgreSqlPooling,
             cancellationToken);
     }
 
@@ -1721,7 +1963,7 @@ END
             queryBuilder.AppendLine("END");
         }
 
-        foreach (var role in SupportedRoles)
+        foreach (var role in SupportedSqlServerRoles)
         {
             var quotedRole = QuoteSqlServerIdentifier(role);
             var wantsRole = desiredRoles.Contains(role, StringComparer.OrdinalIgnoreCase);
@@ -1750,7 +1992,7 @@ END
             queryBuilder.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
         }
 
-        foreach (var role in SupportedRoles)
+        foreach (var role in SupportedPostgreSqlRoles)
         {
             var managedRole = roleMap[role];
             queryBuilder.AppendLine(desiredRoles.Contains(role, StringComparer.OrdinalIgnoreCase)
@@ -1855,8 +2097,6 @@ END
     {
         var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
         var ownerRole = roleMap["db_owner"];
-        var readerRole = roleMap["db_datareader"];
-        var writerRole = roleMap["db_datawriter"];
 
         return $"""
 SELECT
@@ -1869,17 +2109,13 @@ LEFT JOIN (
         auth.member,
         CASE role.rolname
             WHEN {QuotePostgreSqlLiteral(ownerRole)} THEN 'db_owner'
-            WHEN {QuotePostgreSqlLiteral(readerRole)} THEN 'db_datareader'
-            WHEN {QuotePostgreSqlLiteral(writerRole)} THEN 'db_datawriter'
         END AS role_name,
         CASE role.rolname
             WHEN {QuotePostgreSqlLiteral(ownerRole)} THEN 1
-            WHEN {QuotePostgreSqlLiteral(readerRole)} THEN 2
-            WHEN {QuotePostgreSqlLiteral(writerRole)} THEN 3
         END AS sort_order
     FROM pg_auth_members auth
     INNER JOIN pg_roles role ON role.oid = auth.roleid
-    WHERE role.rolname IN ({QuotePostgreSqlLiteral(ownerRole)}, {QuotePostgreSqlLiteral(readerRole)}, {QuotePostgreSqlLiteral(writerRole)})
+    WHERE role.rolname IN ({QuotePostgreSqlLiteral(ownerRole)})
 ) mapped ON mapped.member = member.oid
 WHERE member.rolcanlogin
 GROUP BY member.rolname
@@ -1891,9 +2127,7 @@ ORDER BY member.rolname;
     private static Dictionary<string, string> GetPostgreSqlManagedRoleMap(string databaseName)
         => new(StringComparer.OrdinalIgnoreCase)
         {
-            ["db_owner"] = BuildPostgreSqlManagedRoleName(databaseName, "owner"),
-            ["db_datareader"] = BuildPostgreSqlManagedRoleName(databaseName, "reader"),
-            ["db_datawriter"] = BuildPostgreSqlManagedRoleName(databaseName, "writer")
+            ["db_owner"] = BuildPostgreSqlManagedRoleName(databaseName, "owner")
         };
 
     private static string BuildEnsurePostgreSqlManagedRolesQuery(string databaseName)
@@ -1908,10 +2142,9 @@ ORDER BY member.rolname;
         }
 
         var ownerRole = QuotePostgreSqlIdentifier(roleMap["db_owner"]);
-        var readerRole = QuotePostgreSqlIdentifier(roleMap["db_datareader"]);
-        var writerRole = QuotePostgreSqlIdentifier(roleMap["db_datawriter"]);
 
         query.AppendLine($"GRANT CONNECT, TEMP, CREATE ON DATABASE {quotedDatabase} TO {ownerRole};");
+        query.AppendLine($"GRANT ALL PRIVILEGES ON DATABASE {quotedDatabase} TO {ownerRole};");
         query.AppendLine($"GRANT USAGE, CREATE ON SCHEMA public TO {ownerRole};");
         query.AppendLine($"GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO {ownerRole};");
         query.AppendLine($"GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO {ownerRole};");
@@ -1919,20 +2152,6 @@ ORDER BY member.rolname;
         query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO {ownerRole};");
         query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO {ownerRole};");
         query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON FUNCTIONS TO {ownerRole};");
-
-        query.AppendLine($"GRANT CONNECT ON DATABASE {quotedDatabase} TO {readerRole};");
-        query.AppendLine($"GRANT USAGE ON SCHEMA public TO {readerRole};");
-        query.AppendLine($"GRANT SELECT ON ALL TABLES IN SCHEMA public TO {readerRole};");
-        query.AppendLine($"GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO {readerRole};");
-        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO {readerRole};");
-        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON SEQUENCES TO {readerRole};");
-
-        query.AppendLine($"GRANT CONNECT ON DATABASE {quotedDatabase} TO {writerRole};");
-        query.AppendLine($"GRANT USAGE ON SCHEMA public TO {writerRole};");
-        query.AppendLine($"GRANT INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public TO {writerRole};");
-        query.AppendLine($"GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO {writerRole};");
-        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO {writerRole};");
-        query.AppendLine($"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {writerRole};");
 
         return query.ToString();
     }
@@ -1963,14 +2182,16 @@ ORDER BY member.rolname;
     private static List<string> NormalizeRoles(IReadOnlyList<string> inputRoles, string provider)
     {
         var normalized = new List<string>();
+        var isSqlServer = IsSqlServer(provider);
         foreach (var role in inputRoles)
         {
             normalized.Add(role.Trim().ToLowerInvariant() switch
             {
                 "dbowner" or "db_owner" => "db_owner",
-                "dbreader" or "db_reader" or "db_datareader" => "db_datareader",
-                "dbwriter" or "db_writer" or "db_datawriter" => "db_datawriter",
-                _ => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. Use dbowner/db_owner, dbreader/db_reader/db_datareader, or dbwriter/db_writer/db_datawriter.")
+                "dbreader" or "db_reader" or "db_datareader" when isSqlServer => "db_datareader",
+                "dbwriter" or "db_writer" or "db_datawriter" when isSqlServer => "db_datawriter",
+                _ when isSqlServer => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. Use dbowner/db_owner, dbreader/db_reader/db_datareader, or dbwriter/db_writer/db_datawriter."),
+                _ => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. PostgreSQL supports dbowner/db_owner only.")
             });
         }
 
@@ -1984,38 +2205,88 @@ ORDER BY member.rolname;
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
+    private static string BuildServerConnectionTestQuery(string provider)
+        => IsSqlServer(provider)
+            ? "SELECT CAST(1 AS int);"
+            : "SELECT 1;";
+
+    private static string BuildConnectionString(ResolvedServerContext context, string database, string username, string? password)
+    {
+        if (IsSqlServer(context.Provider))
+        {
+            return ServerConnectionOptions.BuildSqlServerUserConnectionString(
+                context.ServerName,
+                context.Port,
+                database,
+                username,
+                password,
+                context.SqlServerTrustMode);
+        }
+
+        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+            context.ServerName,
+            context.Port,
+            database,
+            username,
+            password,
+            context.PostgreSqlSslMode,
+            context.PostgreSqlPooling,
+            context.Timeouts.ConnectionTimeoutSeconds,
+            context.Timeouts.CommandTimeoutSeconds);
+    }
+
+    private static string BuildConnectionString(ServerConfig server, string database, string username, string? password)
+    {
+        if (IsSqlServer(server.Provider))
+        {
+            return ServerConnectionOptions.BuildSqlServerUserConnectionString(
+                server.ServerName,
+                server.Port,
+                database,
+                username,
+                password,
+                server.SqlServerTrustMode);
+        }
+
+        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+            server.ServerName,
+            server.Port,
+            database,
+            username,
+            password,
+            server.PostgreSqlSslMode,
+            server.PostgreSqlPooling,
+            server.ConnectionTimeoutSeconds,
+            server.CommandTimeoutSeconds);
+    }
+
     private static string BuildConnectionString(string provider, string server, int? port, string database, string username, string? password)
     {
         if (IsSqlServer(provider))
         {
-            var sqlServerTarget = BuildSqlServerConnectionTarget(server, port);
-            return $"Server={sqlServerTarget};Database={database};Persist Security Info=False;User ID={username};Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;";
+            return ServerConnectionOptions.BuildSqlServerUserConnectionString(
+                server,
+                port,
+                database,
+                username,
+                password,
+                string.Empty);
         }
 
-        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
-        var portSegment = port is > 0 ? $";Port={port.Value}" : string.Empty;
-        return $"Host={server}{portSegment};Database={database};Username={username};Password={resolvedPassword};Ssl Mode=Require;";
+        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+            server,
+            port,
+            database,
+            username,
+            password,
+            string.Empty,
+            null,
+            null,
+            null);
     }
 
     private static string BuildSqlServerConnectionTarget(string server, int? port)
-    {
-        var normalizedServer = server.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase)
-            ? server
-            : $"tcp:{server}";
-        if (port is > 0)
-        {
-            if (normalizedServer.Contains(',', StringComparison.Ordinal))
-            {
-                return normalizedServer;
-            }
-
-            return $"{normalizedServer},{port.Value}";
-        }
-
-        return normalizedServer.Contains(',', StringComparison.Ordinal)
-            ? normalizedServer
-            : $"{normalizedServer},1433";
-    }
+        => ServerConnectionOptions.BuildSqlServerDataSource(server, port);
 
     private static bool IsSqlServer(string provider)
         => SqlProviders.Normalize(provider) == SqlProviders.SqlServer;

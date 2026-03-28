@@ -46,6 +46,8 @@ public sealed class ConfigEncryptionTests
                         var user = Assert.Single(database.Users);
 
                         Assert.False(string.IsNullOrWhiteSpace(server.EntryId));
+                        Assert.Equal("1", server.ServerIdentifier);
+                        Assert.Equal("sql01.contoso.local", server.DisplayName);
                         Assert.False(string.IsNullOrWhiteSpace(database.EntryId));
                         Assert.False(string.IsNullOrWhiteSpace(user.EntryId));
 
@@ -131,7 +133,7 @@ public sealed class ConfigEncryptionTests
             var unlockedUser = Assert.Single(Assert.Single(unlockedServer.Databases).Users);
             Assert.Equal("reader-password", unlockedUser.Password);
             Assert.True(unlockedUser.Encrypted);
-            Assert.Contains("Password=;", unlockedUser.ConnectionString, StringComparison.Ordinal);
+            Assert.Contains("Password=********;", unlockedUser.ConnectionString, StringComparison.Ordinal);
         }
         finally
         {
@@ -176,7 +178,7 @@ public sealed class ConfigEncryptionTests
             var user = Assert.Single(Assert.Single(server.Databases).Users);
             Assert.False(user.Encrypted);
             Assert.Equal("reader-password", user.Password);
-            Assert.Contains("Password=;", user.ConnectionString, StringComparison.Ordinal);
+            Assert.Contains("Password=********;", user.ConnectionString, StringComparison.Ordinal);
         }
         finally
         {
@@ -273,31 +275,164 @@ public sealed class ConfigEncryptionTests
             var service = CreateService();
             var updateResult = await service.UpdateServerAsync(
                 filePath,
-                "sql01.contoso.local",
+                "1",
+                "Postgres Admin",
                 "pg01.contoso.local",
                 SqlProviders.PostgreSql,
                 5432,
                 "postgres",
                 "postgres",
                 "PostgresAdminSecret123!",
+                PostgreSqlSslModes.Prefer,
+                true,
+                null,
+                15,
+                30,
                 null,
                 CancellationToken.None);
 
             Assert.True(updateResult.Succeeded);
 
             var stored = await store.LoadAsync(filePath, CancellationToken.None);
-            Assert.Equal("pg01.contoso.local", stored.SelectedServerName);
+            Assert.Equal("1", stored.SelectedServerName);
 
             var server = Assert.Single(stored.Servers);
+            Assert.Equal("1", server.ServerIdentifier);
+            Assert.Equal("Postgres Admin", server.DisplayName);
             Assert.Equal("pg01.contoso.local", server.ServerName);
             Assert.Equal(SqlProviders.PostgreSql, server.Provider);
             Assert.Equal(5432, server.Port);
             Assert.Equal("postgres", server.AdminDatabase);
             Assert.Equal("postgres", server.AdminUsername);
             Assert.Equal("PostgresAdminSecret123!", server.AdminPassword);
+            Assert.Equal(PostgreSqlSslModes.Prefer, server.PostgreSqlSslMode);
+            Assert.True(server.PostgreSqlPooling);
+            Assert.Equal(15, server.ConnectionTimeoutSeconds);
+            Assert.Equal(30, server.CommandTimeoutSeconds);
 
             var user = Assert.Single(Assert.Single(server.Databases).Users);
-            Assert.Contains("Host=pg01.contoso.local;Port=5432;Database=LabDB;Username=lab_reader;Password=********;Ssl Mode=Require;", user.ConnectionString, StringComparison.Ordinal);
+            Assert.Equal(
+                "Host=pg01.contoso.local;Database=LabDB;Username=lab_reader;Password=********;Ssl Mode=Prefer;Port=5432;Timeout=15;Command Timeout=30;Pooling=true;",
+                user.ConnectionString);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AddServerAsync_AllowsSameHostWhenAllocatingANewConnectionId()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-duplicate-add-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, CreatePlaintextConfig(), CancellationToken.None);
+
+            var service = CreateService();
+            var addResult = await service.AddServerAsync(new CommandOptions
+            {
+                Command = CommandKind.AddServer,
+                ConfigPath = filePath,
+                DisplayName = "Duplicate SQL",
+                ServerName = "sql01.contoso.local",
+                Provider = SqlProviders.PostgreSql,
+                Port = 5432,
+                AdminDatabase = "postgres",
+                AdminUsername = "postgres",
+                AdminPassword = "PostgresAdminSecret123!"
+            }, CancellationToken.None);
+
+            Assert.True(addResult.Succeeded);
+
+            var stored = await store.LoadAsync(filePath, CancellationToken.None);
+            Assert.Equal(2, stored.Servers.Count);
+            Assert.Contains(stored.Servers, server => server.ServerIdentifier == "1" && server.Provider == SqlProviders.SqlServer);
+            Assert.Contains(stored.Servers, server => server.ServerIdentifier == "2" && server.Provider == SqlProviders.PostgreSql);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AddServerAsync_AllowsSameHostWithDifferentConnectionIdentifiers()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-duplicate-host-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, CreatePlaintextConfig(), CancellationToken.None);
+
+            var service = CreateService();
+            var addResult = await service.AddServerAsync(new CommandOptions
+            {
+                Command = CommandKind.AddServer,
+                ConfigPath = filePath,
+                DisplayName = "SQL Reporting",
+                ServerName = "sql01.contoso.local",
+                Provider = SqlProviders.SqlServer,
+                Port = 1433,
+                AdminDatabase = "master",
+                AdminUsername = "readonly_admin",
+                AdminPassword = "AnotherSecret123!"
+            }, CancellationToken.None);
+
+            Assert.True(addResult.Succeeded);
+
+            var stored = await store.LoadAsync(filePath, CancellationToken.None);
+            Assert.Equal(2, stored.Servers.Count);
+            Assert.Contains(stored.Servers, server => server.ServerIdentifier == "1");
+            Assert.Contains(stored.Servers, server => server.ServerIdentifier == "2" && server.ServerName == "sql01.contoso.local");
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task AddServerAsync_IgnoresSuppliedIdentifierAndAllocatesNextNumericId()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-auto-id-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, CreatePlaintextConfig(), CancellationToken.None);
+
+            var service = CreateService();
+            var addResult = await service.AddServerAsync(new CommandOptions
+            {
+                Command = CommandKind.AddServer,
+                ConfigPath = filePath,
+                ServerIdentifier = "999",
+                DisplayName = "SQL Secondary",
+                ServerName = "sql02.contoso.local",
+                Provider = SqlProviders.SqlServer,
+                Port = 1433,
+                AdminDatabase = "master",
+                AdminUsername = "sa",
+                AdminPassword = "AnotherSecret123!"
+            }, CancellationToken.None);
+
+            Assert.True(addResult.Succeeded);
+
+            var stored = await store.LoadAsync(filePath, CancellationToken.None);
+            Assert.Contains(stored.Servers, server => server.ServerName == "sql02.contoso.local" && server.ServerIdentifier == "2");
         }
         finally
         {
@@ -539,11 +674,13 @@ public sealed class ConfigEncryptionTests
     private static SqlManagerConfig CreatePlaintextConfig()
         => new()
         {
-            SelectedServerName = "sql01.contoso.local",
+            SelectedServerName = "1",
             Servers =
             [
                 new ServerConfig
                 {
+                    ServerIdentifier = "1",
+                    DisplayName = "Primary SQL",
                     ServerName = "sql01.contoso.local",
                     Provider = SqlProviders.SqlServer,
                     AdminDatabase = "master",

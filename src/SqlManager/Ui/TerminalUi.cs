@@ -98,8 +98,9 @@ internal sealed class TerminalUi
         var grid = new Grid();
         grid.AddColumn();
         grid.AddColumn();
+        var selectedServer = ServerConnections.FindBySelectionKey(config.Servers, config.SelectedServerName);
         grid.AddRow("Config Path", configPath);
-        grid.AddRow("Selected Server", string.IsNullOrWhiteSpace(config.SelectedServerName) ? "<none>" : config.SelectedServerName);
+        grid.AddRow("Selected Server", selectedServer is null ? "<none>" : ServerConnections.GetSelectionDisplay(selectedServer));
         grid.AddRow("Password Storage", protectionState);
         grid.AddRow("Configured Servers", config.Servers.Count.ToString());
         grid.AddRow("Tracked Databases", totalDatabases.ToString());
@@ -122,7 +123,8 @@ internal sealed class TerminalUi
         var table = new Table()
             .Border(TableBorder.Rounded)
             .AddColumn("Active")
-            .AddColumn("Server")
+            .AddColumn("Connection")
+            .AddColumn("Host")
             .AddColumn("Provider")
             .AddColumn("Admin User")
             .AddColumn("Databases")
@@ -131,9 +133,10 @@ internal sealed class TerminalUi
         foreach (var server in config.Servers)
         {
             var isActive = !string.IsNullOrWhiteSpace(activeServer)
-                && server.ServerName.Equals(activeServer, StringComparison.OrdinalIgnoreCase);
+                && ServerConnections.GetIdentifier(server).Equals(activeServer, StringComparison.OrdinalIgnoreCase);
             table.AddRow(
                 isActive ? "*" : string.Empty,
+                ServerConnections.GetSelectionDisplay(server),
                 server.ServerName,
                 SqlProviders.GetDisplayName(server.Provider),
                 string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername,

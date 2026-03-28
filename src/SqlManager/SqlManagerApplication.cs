@@ -285,30 +285,32 @@ internal sealed class SqlManagerApplication
         }
 
         var config = summary.Value;
-        var serverName = options.ServerName;
-        if (string.IsNullOrWhiteSpace(serverName))
+        var serverSelection = options.ServerIdentifier ?? options.ServerName;
+        if (string.IsNullOrWhiteSpace(serverSelection))
         {
             if (!string.IsNullOrWhiteSpace(config.SelectedServerName))
             {
-                serverName = config.SelectedServerName;
+                serverSelection = config.SelectedServerName;
             }
             else if (config.Servers.Count == 1)
             {
-                serverName = config.Servers[0].ServerName;
+                serverSelection = ServerConnections.GetIdentifier(config.Servers[0]);
             }
         }
 
-        if (string.IsNullOrWhiteSpace(serverName))
+        if (string.IsNullOrWhiteSpace(serverSelection))
         {
             return;
         }
 
-        var server = config.Servers.FirstOrDefault(candidate => candidate.ServerName.Equals(serverName, StringComparison.OrdinalIgnoreCase));
+        var server = ServerConnections.FindBySelectionKey(config.Servers, serverSelection);
         if (server is null)
         {
             return;
         }
 
+        options.ServerIdentifier ??= ServerConnections.GetIdentifier(server);
+        options.DisplayName ??= ServerConnections.GetDisplayName(server);
         options.ServerName ??= server.ServerName;
         options.Provider ??= server.Provider;
         options.Port ??= server.Port;
@@ -366,7 +368,7 @@ internal sealed class SqlManagerApplication
             return config.SelectedServerName;
         }
 
-        return config.Servers.Count == 1 ? config.Servers[0].ServerName : string.Empty;
+        return config.Servers.Count == 1 ? ServerConnections.GetIdentifier(config.Servers[0]) : string.Empty;
     }
 
     private async Task<string?> PromptActiveServerAsync(string configPath, SqlManagerConfig config, string? activeServer, CancellationToken cancellationToken)
@@ -379,7 +381,7 @@ internal sealed class SqlManagerApplication
 
         var labelMap = config.Servers.ToDictionary(
             server => BuildServerChoiceLabel(server, activeServer),
-            server => server.ServerName,
+            server => ServerConnections.GetIdentifier(server),
             StringComparer.Ordinal);
         var response = _ui.PromptSelectionWithNavigation("Select active server", labelMap.Keys);
         if (response.Navigation != PromptNavigation.Submit || response.Value is null)
@@ -387,17 +389,17 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var serverName = labelMap[response.Value];
+        var serverIdentifier = labelMap[response.Value];
         var result = await _service.SelectServerAsync(
             new CommandOptions
             {
                 Command = CommandKind.SelectServer,
                 ConfigPath = configPath,
-                ServerName = serverName
+                ServerIdentifier = serverIdentifier
             },
             cancellationToken);
         _ui.RenderResult(result);
-        return result.Succeeded ? serverName : null;
+        return result.Succeeded ? serverIdentifier : null;
     }
 
     private async Task<CommandOptions?> PromptInitializeConfigAsync(string configPath, string? activeServer)
@@ -511,7 +513,6 @@ internal sealed class SqlManagerApplication
 
     private async Task<CommandOptions?> PromptAddServerAsync(string configPath, SqlManagerConfig config, string? activeServer)
     {
-        var existingServer = config.Servers.FirstOrDefault(server => server.ServerName.Equals(activeServer, StringComparison.OrdinalIgnoreCase));
         var options = new CommandOptions
         {
             Command = CommandKind.AddServer,
@@ -525,7 +526,7 @@ internal sealed class SqlManagerApplication
             {
                 case 0:
                 {
-                    var response = _ui.PromptTextWithNavigation("Server name:", activeServer, false);
+                    var response = _ui.PromptTextWithNavigation("Server name:", null, false);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -542,7 +543,24 @@ internal sealed class SqlManagerApplication
                 }
                 case 1:
                 {
-                    var response = PromptProviderWithNavigation(existingServer?.Provider);
+                    var response = _ui.PromptTextWithNavigation("Display name:", options.ServerName, false);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.DisplayName = response.Value;
+                    step++;
+                    continue;
+                }
+                case 2:
+                {
+                    var response = PromptProviderWithNavigation(null);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -557,9 +575,9 @@ internal sealed class SqlManagerApplication
                     step++;
                     continue;
                 }
-                case 2:
+                case 3:
                 {
-                    var response = _ui.PromptTextWithNavigation("Admin username (leave blank to skip):", existingServer?.AdminUsername, true);
+                    var response = _ui.PromptTextWithNavigation("Admin username (leave blank to skip):", null, true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -574,9 +592,26 @@ internal sealed class SqlManagerApplication
                     step++;
                     continue;
                 }
-                case 3:
+                case 4:
                 {
-                    var response = PromptPortWithNavigation(existingServer?.Port);
+                    var response = _ui.PromptSecretWithNavigation("Admin password (leave blank to skip):");
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.AdminPassword = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
+                    step++;
+                    continue;
+                }
+                case 5:
+                {
+                    var response = PromptPortWithNavigation(null);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -591,14 +626,10 @@ internal sealed class SqlManagerApplication
                     step++;
                     continue;
                 }
-                case 4:
+                case 6:
                 {
-                    var defaultAdminDatabase = existingServer?.AdminDatabase;
-                    if (string.IsNullOrWhiteSpace(defaultAdminDatabase) && options.Provider == SqlProviders.PostgreSql)
-                    {
-                        defaultAdminDatabase = SqlProviders.GetDefaultAdminDatabase(options.Provider);
-                    }
-
+                    var provider = SqlProviders.Normalize(options.Provider);
+                    var defaultAdminDatabase = SqlProviders.GetDefaultAdminDatabase(provider);
                     var response = _ui.PromptTextWithNavigation("Admin database (leave blank for provider default):", defaultAdminDatabase, true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
@@ -611,6 +642,95 @@ internal sealed class SqlManagerApplication
                     }
 
                     options.AdminDatabase = string.IsNullOrWhiteSpace(response.Value) ? null : response.Value;
+                    step++;
+                    continue;
+                }
+                case 7:
+                {
+                    if (SqlProviders.Normalize(options.Provider) == SqlProviders.PostgreSql)
+                    {
+                        var response = PromptPostgreSqlSslModeWithNavigation(options.PostgreSqlSslMode);
+                                            if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                        {
+                            if (exitWizard)
+                            {
+                                return null;
+                            }
+
+                            continue;
+                        }
+
+                        options.PostgreSqlSslMode = response.Value;
+                        step++;
+                        continue;
+                    }
+
+                    var trustModeResponse = PromptSqlServerTrustModeWithNavigation(options.SqlServerTrustMode);
+                                        if (HandlePromptNavigation(trustModeResponse, ref step, out var exitWizard2))
+                    {
+                        if (exitWizard2)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.SqlServerTrustMode = trustModeResponse.Value;
+                    return options;
+                }
+                case 8:
+                {
+                    var response = PromptOptionalPositiveIntegerWithNavigation(
+                        "Timeout (seconds, leave blank for default):",
+                        options.ConnectionTimeoutSeconds ?? SqlTimeoutConfig.DefaultConnectionTimeoutSeconds);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.ConnectionTimeoutSeconds = response.Value;
+                    step++;
+                    continue;
+                }
+                case 9:
+                {
+                    var response = PromptOptionalPositiveIntegerWithNavigation(
+                        "Command timeout (seconds, leave blank for default):",
+                        options.CommandTimeoutSeconds ?? SqlTimeoutConfig.DefaultCommandTimeoutSeconds);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.CommandTimeoutSeconds = response.Value;
+                    step++;
+                    continue;
+                }
+                case 10:
+                {
+                    var response = _ui.PromptConfirmWithNavigation("Enable PostgreSQL pooling?", options.PostgreSqlPooling ?? true);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.PostgreSqlPooling = response.Value;
                     return options;
                 }
                 default:
@@ -626,7 +746,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.SyncServer, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.SyncServer, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -678,7 +798,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.CreateDatabase, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.CreateDatabase, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -747,7 +867,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.CreateUser, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.CreateUser, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -823,7 +943,7 @@ internal sealed class SqlManagerApplication
                 }
                 case 4:
                 {
-                    var response = PromptRolesWithNavigation();
+                    var response = PromptRolesWithNavigation(serverConfig.Provider);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -888,7 +1008,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.AddRole, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.AddRole, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -964,7 +1084,7 @@ internal sealed class SqlManagerApplication
                 }
                 case 4:
                 {
-                    var response = PromptRolesWithNavigation();
+                    var response = PromptRolesWithNavigation(serverConfig.Provider);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -991,7 +1111,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.ShowUsers, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.ShowUsers, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -1060,7 +1180,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.RemoveUser, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.RemoveUser, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -1171,7 +1291,7 @@ internal sealed class SqlManagerApplication
             return null;
         }
 
-        var options = CreateServerScopedOptions(CommandKind.UpdatePassword, configPath, serverConfig.ServerName);
+        var options = CreateServerScopedOptions(CommandKind.UpdatePassword, configPath, serverConfig);
         var step = 0;
         while (true)
         {
@@ -1298,9 +1418,12 @@ internal sealed class SqlManagerApplication
         return response;
     }
 
-    private PromptResponse<IReadOnlyList<string>> PromptRolesWithNavigation()
+    private PromptResponse<IReadOnlyList<string>> PromptRolesWithNavigation(string provider)
     {
-        var response = _ui.PromptTextWithNavigation("Roles (comma separated):", "db_owner", false);
+        var prompt = SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
+            ? "Roles (comma separated, PostgreSQL supports db_owner only):"
+            : "Roles (comma separated):";
+        var response = _ui.PromptTextWithNavigation(prompt, "db_owner", false);
         return response.Navigation switch
         {
             PromptNavigation.Back => PromptResponse<IReadOnlyList<string>>.Back(),
@@ -1354,6 +1477,69 @@ internal sealed class SqlManagerApplication
         }
     }
 
+    private PromptResponse<string> PromptPostgreSqlSslModeWithNavigation(string? currentSslMode)
+    {
+        var preferredMode = PostgreSqlSslModes.GetEffective(currentSslMode);
+        var orderedModes = new[] { preferredMode }
+            .Concat(PostgreSqlSslModes.Choices.Where(mode => !mode.Equals(preferredMode, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var choices = orderedModes
+            .Select(PostgreSqlSslModes.GetPickerDisplayName)
+            .ToArray();
+        var response = _ui.PromptSelectionWithNavigation("PostgreSQL SSL mode", choices);
+        return response.Navigation switch
+        {
+            PromptNavigation.Back => PromptResponse<string>.Back(),
+            PromptNavigation.Cancel => PromptResponse<string>.Cancel(),
+            _ => PromptResponse<string>.Submitted(orderedModes[Math.Max(0, Array.IndexOf(choices, response.Value))])
+        };
+    }
+
+    private PromptResponse<string> PromptSqlServerTrustModeWithNavigation(string? currentTrustMode)
+    {
+        var preferredMode = SqlServerTrustModes.GetEffective(currentTrustMode);
+        var orderedModes = new[] { preferredMode }
+            .Concat(SqlServerTrustModes.Choices.Where(mode => !mode.Equals(preferredMode, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var choices = orderedModes
+            .Select(SqlServerTrustModes.GetPickerDisplayName)
+            .ToArray();
+        var response = _ui.PromptSelectionWithNavigation("SQL Server trust mode", choices);
+        return response.Navigation switch
+        {
+            PromptNavigation.Back => PromptResponse<string>.Back(),
+            PromptNavigation.Cancel => PromptResponse<string>.Cancel(),
+            _ => PromptResponse<string>.Submitted(orderedModes[Math.Max(0, Array.IndexOf(choices, response.Value))])
+        };
+    }
+
+    private PromptResponse<int?> PromptOptionalPositiveIntegerWithNavigation(string prompt, int? currentValue)
+    {
+        while (true)
+        {
+            var response = _ui.PromptTextWithNavigation(prompt, currentValue?.ToString(), true);
+            switch (response.Navigation)
+            {
+                case PromptNavigation.Back:
+                    return PromptResponse<int?>.Back();
+                case PromptNavigation.Cancel:
+                    return PromptResponse<int?>.Cancel();
+            }
+
+            if (string.IsNullOrWhiteSpace(response.Value))
+            {
+                return PromptResponse<int?>.Submitted(null);
+            }
+
+            if (int.TryParse(response.Value, out var value) && value > 0)
+            {
+                return PromptResponse<int?>.Submitted(value);
+            }
+
+            _ui.WriteWarning("Value must be a positive integer.");
+        }
+    }
+
     private PromptResponse<RemovalScope> PromptRemovalScopeWithNavigation()
     {
         var response = _ui.PromptSelectionWithNavigation("Removal scope", Enum.GetNames<RemovalScope>());
@@ -1393,7 +1579,7 @@ internal sealed class SqlManagerApplication
 
     private bool TryGetActiveServer(SqlManagerConfig config, string? activeServer, out ServerConfig serverConfig)
     {
-        serverConfig = config.Servers.FirstOrDefault(server => server.ServerName.Equals(activeServer, StringComparison.OrdinalIgnoreCase))!;
+        serverConfig = ServerConnections.FindBySelectionKey(config.Servers, activeServer)!;
         if (serverConfig is not null)
         {
             return true;
@@ -1403,22 +1589,24 @@ internal sealed class SqlManagerApplication
         return false;
     }
 
-    private static CommandOptions CreateServerScopedOptions(CommandKind command, string configPath, string serverName)
+    private static CommandOptions CreateServerScopedOptions(CommandKind command, string configPath, ServerConfig server)
         => new()
         {
             Command = command,
             ConfigPath = configPath,
-            ServerName = serverName
+            ServerIdentifier = ServerConnections.GetIdentifier(server),
+            DisplayName = ServerConnections.GetDisplayName(server),
+            ServerName = server.ServerName
         };
 
     private static string BuildServerChoiceLabel(ServerConfig server, string? activeServer)
     {
         var activeMarker = !string.IsNullOrWhiteSpace(activeServer)
-            && server.ServerName.Equals(activeServer, StringComparison.OrdinalIgnoreCase)
+            && ServerConnections.GetIdentifier(server).Equals(activeServer, StringComparison.OrdinalIgnoreCase)
             ? "* "
             : string.Empty;
         var adminUser = string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername;
-        return $"{activeMarker}{server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {adminUser}";
+        return $"{activeMarker}{ServerConnections.GetSelectionDisplay(server)} | host: {server.ServerName} | provider: {SqlProviders.GetDisplayName(server.Provider)} | admin: {adminUser}";
     }
 
     private static RemovalScope ParseScope(string value)

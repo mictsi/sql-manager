@@ -16,8 +16,8 @@ internal static class HelpContent
         "sql-manager create-database --database-name <database> --admin-password <password>",
         "sql-manager remove-database --database-name <database> --admin-password <password>",
         "sql-manager create-user --database-name <database> --user-name <user> --roles db_owner --admin-password <password> [--new-user-password <password>]",
-        "sql-manager add-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>",
-        "sql-manager remove-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>",
+        "sql-manager add-role --database-name <database> --user-name <user> --roles db_owner --admin-password <password>",
+        "sql-manager remove-role --database-name <database> --user-name <user> --roles db_owner --admin-password <password>",
         "sql-manager show-users --database-name <database> --admin-password <password>",
         "sql-manager test-user-login --database-name <database> --user-name <user> [--user-password <password>]",
         "sql-manager remove-user --user-name <user> --database-name <database> [--database-name <database>] [--remove-server-login] --removal-scope Database|Server|Both --admin-password <password>",
@@ -31,7 +31,7 @@ internal static class HelpContent
     private static readonly string[] NoteLines =
     [
         "PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.",
-        "Generic roles are translated per provider: db_owner, db_datareader, db_datawriter.",
+        "Roles vary by provider: SQL Server supports db_owner, db_datareader, db_datawriter; PostgreSQL supports db_owner only.",
         "Encrypted configs can be unlocked for CLI operations with --encryption-password <password>."
     ];
 

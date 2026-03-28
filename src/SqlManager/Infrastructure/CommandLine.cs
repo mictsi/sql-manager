@@ -40,12 +40,19 @@ internal sealed class CommandOptions
 {
     public required CommandKind Command { get; set; }
     public required string ConfigPath { get; set; }
+    public string? ServerIdentifier { get; set; }
+    public string? DisplayName { get; set; }
     public string? ServerName { get; set; }
     public string? Provider { get; set; }
     public int? Port { get; set; }
     public string? AdminDatabase { get; set; }
     public string? AdminUsername { get; set; }
     public string? AdminPassword { get; set; }
+    public string? PostgreSqlSslMode { get; set; }
+    public bool? PostgreSqlPooling { get; set; }
+    public string? SqlServerTrustMode { get; set; }
+    public int? ConnectionTimeoutSeconds { get; set; }
+    public int? CommandTimeoutSeconds { get; set; }
     public string? DatabaseName { get; set; }
     public IReadOnlyList<string> DatabaseNames { get; set; } = Array.Empty<string>();
     public string? UserName { get; set; }
@@ -125,6 +132,9 @@ internal static class CommandLineParser
             var removalScope = ParseRemovalScope(GetSingleOrDefault(optionMap, "Both", "removalscope"));
             var provider = ParseProvider(GetSingleOrDefault(optionMap, null, "provider", "serverprovider"));
             var port = ParseNullableInt(GetSingleOrDefault(optionMap, null, "port"), "Port must be a positive integer.");
+            var connectionTimeout = ParseNullableInt(GetSingleOrDefault(optionMap, null, "connectiontimeout", "timeout"), "Connection timeout must be a positive integer.");
+            var commandTimeout = ParseNullableInt(GetSingleOrDefault(optionMap, null, "commandtimeout"), "Command timeout must be a positive integer.");
+            var pooling = ParseNullableBool(GetSingleOrDefault(optionMap, null, "pooling"), "Pooling must be true or false.");
             var parsed = new ParsedArguments
             {
                 Command = command.Value,
@@ -132,12 +142,19 @@ internal static class CommandLineParser
                 {
                     Command = command.Value,
                     ConfigPath = configPath,
+                    ServerIdentifier = GetSingleOrDefault(optionMap, null, "serveridentifier", "identifier", "serverid"),
+                    DisplayName = GetSingleOrDefault(optionMap, null, "displayname"),
                     ServerName = GetSingleOrDefault(optionMap, null, "servername", "server"),
                     Provider = provider,
                     Port = port,
                     AdminDatabase = GetSingleOrDefault(optionMap, null, "admindatabase", "maintenanceDatabase", "maintenanceDb"),
                     AdminUsername = GetSingleOrDefault(optionMap, null, "adminusername", "adminuser", "sqladmin"),
                     AdminPassword = GetSingleOrDefault(optionMap, null, "adminpassword"),
+                    PostgreSqlSslMode = GetSingleOrDefault(optionMap, null, "sslmode"),
+                    PostgreSqlPooling = pooling,
+                    SqlServerTrustMode = GetSingleOrDefault(optionMap, null, "trustservercertificate", "trustmode"),
+                    ConnectionTimeoutSeconds = connectionTimeout,
+                    CommandTimeoutSeconds = commandTimeout,
                     DatabaseName = databaseNames.Count > 0 ? databaseNames[^1] : null,
                     DatabaseNames = databaseNames,
                     UserName = GetSingleOrDefault(optionMap, null, "username", "user"),
@@ -324,5 +341,20 @@ internal static class CommandLineParser
         }
 
         return value;
+    }
+
+    private static bool? ParseNullableBool(string? rawValue, string errorMessage)
+    {
+        if (string.IsNullOrWhiteSpace(rawValue))
+        {
+            return null;
+        }
+
+        return rawValue.Trim().ToLowerInvariant() switch
+        {
+            "true" or "yes" or "1" => true,
+            "false" or "no" or "0" => false,
+            _ => throw new InvalidOperationException(errorMessage)
+        };
     }
 }
