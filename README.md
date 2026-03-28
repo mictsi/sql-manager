@@ -2,7 +2,7 @@
 
 SQL Server and PostgreSQL management utility with:
 
-- a .NET 10 command-line utility
+- a .NET 10 command-line cross-plattform utility
 - a built-in terminal UI for interactive management
 
 ## Security Information
