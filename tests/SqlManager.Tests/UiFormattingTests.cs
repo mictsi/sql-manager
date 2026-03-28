@@ -103,7 +103,7 @@ public sealed class UiFormattingTests
     }
 
     [Fact]
-    public void BuildAboutSummaryText_IncludesCopyrightAndBuildLabel()
+    public void BuildAboutSummaryText_IncludesCreditsAndBuildLabel()
     {
         var aboutText = InvokePrivateStatic<string>(
             typeof(TerminalGuiRunner),
@@ -112,6 +112,10 @@ public sealed class UiFormattingTests
         Assert.Contains("SQL Manager", aboutText);
         Assert.Contains("Copyright @mictsi", aboutText);
         Assert.Contains("Built:", aboutText);
+        Assert.Contains("Terminal.Gui", aboutText);
+        Assert.Contains("Spectre.Console", aboutText);
+        Assert.Contains("Microsoft.Data.SqlClient", aboutText);
+        Assert.Contains("Npgsql", aboutText);
     }
 
     [Fact]

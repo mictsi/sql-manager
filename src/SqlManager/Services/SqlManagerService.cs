@@ -273,6 +273,15 @@ internal sealed class SqlManagerService
             return OperationResult.Success($"Configuration saved to '{configPath}'.");
         });
 
+    public Task<OperationResult> UpdateThemePreferenceAsync(string configPath, string? encryptionPassword, string themeName, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var config = await LoadEditableConfigAsync(configPath, encryptionPassword, cancellationToken);
+            config.ThemeName = TerminalThemeCatalog.NormalizeThemeName(themeName);
+            await SaveEditableConfigAsync(configPath, config, encryptionPassword, cancellationToken);
+            return OperationResult.Success($"Theme set to '{config.ThemeName}'.");
+        });
+
     public Task<OperationResult> SyncServerAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
@@ -905,6 +914,7 @@ END
         => new()
         {
             SelectedServerName = source.SelectedServerName,
+            ThemeName = source.ThemeName,
             EncryptPasswords = source.EncryptPasswords,
             EncryptionKey = source.EncryptionKey,
             EncryptedPayload = source.EncryptedPayload,

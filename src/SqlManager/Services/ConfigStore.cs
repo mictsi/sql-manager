@@ -48,6 +48,7 @@ internal sealed class ConfigStore
         var json = config.EncryptPasswords && !string.IsNullOrWhiteSpace(config.EncryptedPayload)
             ? JsonSerializer.Serialize(new EncryptedConfigEnvelope
             {
+                ThemeName = config.ThemeName,
                 EncryptPasswords = true,
                 EncryptionKey = config.EncryptionKey,
                 EncryptedPayload = config.EncryptedPayload
@@ -63,6 +64,7 @@ internal sealed class ConfigStore
     private static SqlManagerConfig ParseEncryptedEnvelope(JsonNode root)
         => new()
         {
+            ThemeName = root["themeName"]?.GetValue<string>() ?? TerminalThemeCatalog.DefaultThemeName,
             EncryptPasswords = root["encryptPasswords"]?.GetValue<bool>() ?? true,
             EncryptionKey = root["encryptionKey"]?.GetValue<string>() ?? string.Empty,
             EncryptedPayload = root["encryptedPayload"]?.GetValue<string>() ?? string.Empty
@@ -73,6 +75,7 @@ internal sealed class ConfigStore
         var config = new SqlManagerConfig
         {
             SelectedServerName = root["selectedServerName"]?.GetValue<string>() ?? string.Empty,
+            ThemeName = root["themeName"]?.GetValue<string>() ?? TerminalThemeCatalog.DefaultThemeName,
             EncryptPasswords = root["encryptPasswords"]?.GetValue<bool>() ?? false,
             EncryptionKey = root["encryptionKey"]?.GetValue<string>() ?? string.Empty,
             Timeouts = new SqlTimeoutConfig
@@ -294,6 +297,7 @@ internal sealed class ConfigStore
     private static void Normalize(SqlManagerConfig config)
     {
         config.SelectedServerName ??= string.Empty;
+        config.ThemeName = TerminalThemeCatalog.NormalizeThemeName(config.ThemeName);
         config.EncryptionKey ??= string.Empty;
         config.Timeouts ??= new SqlTimeoutConfig();
         if (config.Timeouts.ConnectionTimeoutSeconds <= 0)
@@ -456,6 +460,7 @@ internal sealed class ConfigStore
 
     private sealed class EncryptedConfigEnvelope
     {
+        public string ThemeName { get; set; } = TerminalThemeCatalog.DefaultThemeName;
         public bool EncryptPasswords { get; set; }
         public string EncryptionKey { get; set; } = string.Empty;
         public string EncryptedPayload { get; set; } = string.Empty;

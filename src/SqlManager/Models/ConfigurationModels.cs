@@ -27,6 +27,7 @@ internal static class SqlProviders
 internal sealed class SqlManagerConfig
 {
     public string SelectedServerName { get; set; } = string.Empty;
+    public string ThemeName { get; set; } = TerminalThemeCatalog.DefaultThemeName;
     public bool EncryptPasswords { get; set; }
     public string EncryptionKey { get; set; } = string.Empty;
     [JsonIgnore]

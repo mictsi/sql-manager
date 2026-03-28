@@ -6,6 +6,7 @@ using Terminal.Gui.Drivers;
 using Terminal.Gui.Input;
 using Terminal.Gui.ViewBase;
 using Terminal.Gui.Views;
+using GuiScheme = Terminal.Gui.Drawing.Scheme;
 
 namespace SqlManager;
 
@@ -22,10 +23,13 @@ internal sealed class TerminalGuiRunner
     private string _configPath = string.Empty;
     private SqlManagerConfig _config = new();
     private string? _activeServer;
+    private Window? _mainWindow;
+    private MenuBar? _mainMenuBar;
     private Label? _activeServerLabel;
     private Button? _initialMainButton;
     private readonly List<IReadOnlyList<Button>> _mainMenuColumns = [];
     private readonly Dictionary<Button, (int ColumnIndex, int RowIndex)> _mainMenuButtonPositions = [];
+    private readonly Dictionary<TerminalThemeSurface, GuiScheme> _themeSchemes = [];
     private bool _exitConfirmationApproved;
     private bool _exitPromptOpen;
     private bool _exitPromptQueued;
@@ -50,6 +54,7 @@ internal sealed class TerminalGuiRunner
         {
             app.Init();
             _app = app;
+            ConfigureTheme(app, null);
 
             using var registration = cancellationToken.Register(() =>
             {
@@ -75,6 +80,7 @@ internal sealed class TerminalGuiRunner
 
             _config = summary.Value;
             _activeServer = ResolveActiveServerName(_config);
+            ConfigureTheme(app, _config.ThemeName);
 
             if (_config.EncryptPasswords && !PromptForStartupEncryptionPassword())
             {
@@ -90,6 +96,8 @@ internal sealed class TerminalGuiRunner
                 Height = Dim.Fill(),
                 TabStop = TabBehavior.TabGroup
             };
+            _mainWindow = window;
+            ApplyTheme(window, TerminalThemeSurface.Runnable);
             window.IsRunningChanging += OnMainWindowIsRunningChanging;
             window.KeyDown += OnMainWindowKeyDown;
 
@@ -101,6 +109,8 @@ internal sealed class TerminalGuiRunner
         }
         finally
         {
+            _mainWindow = null;
+            _mainMenuBar = null;
             _app = null;
             app.Dispose();
             _configEncryptionPassword.Dispose();
@@ -111,6 +121,7 @@ internal sealed class TerminalGuiRunner
     private void BuildMainWindow(Window window)
     {
         var menuBar = BuildMenuBar();
+        _mainMenuBar = menuBar;
         _activeServerLabel = new Label
         {
             X = 1,
@@ -159,7 +170,8 @@ internal sealed class TerminalGuiRunner
     }
 
     private MenuBar BuildMenuBar()
-        => new([
+    {
+        var menuBar = new MenuBar([
             new MenuBarItem("_File", new PopoverMenu([
                 new MenuItem("_Save", "Ctrl+S", SaveCurrentConfig, Key.S.WithCtrl),
                 new MenuItem("E_xit", "Ctrl+Q", TryRequestApplicationExit, Key.Q.WithCtrl)
@@ -167,6 +179,7 @@ internal sealed class TerminalGuiRunner
             new MenuBarItem("_Configuration", new PopoverMenu([
                 new MenuItem("_View Config", string.Empty, ShowConfigDialog, default),
                 new MenuItem("_Initialize Config", string.Empty, ShowInitializeConfigDialog, default),
+                new MenuItem("_Theme", string.Empty, ShowThemeSelectionDialog, default),
                 new MenuItem("_Toggle Encrypt Passwords", string.Empty, ShowPasswordEncryptionDialog, default),
                 new MenuItem("_Trash Bin", string.Empty, ShowTrashBinDialog, default),
                 new MenuItem("_Refresh", string.Empty, ReloadAndRefresh, default)
@@ -191,6 +204,10 @@ internal sealed class TerminalGuiRunner
             Width = Dim.Fill(),
             Height = 1
         };
+
+        ApplyTheme(menuBar, TerminalThemeSurface.Menu);
+        return menuBar;
+    }
 
     private List<Button> AddMenuColumn(Window window, int columnIndex, string title, Pos x, int topY, Dim width, IReadOnlyList<(string Title, Action Action)> actions)
     {
@@ -324,6 +341,8 @@ internal sealed class TerminalGuiRunner
             _activeServer = ResolveActiveServerName(_config);
         }
 
+        ConfigureTheme(RequireApp(), _config.ThemeName);
+        RefreshMainTheme();
         RefreshViews();
     }
 
@@ -348,6 +367,7 @@ internal sealed class TerminalGuiRunner
         {
             $"Config Path: {_configPath}",
             $"Selected Server: {(string.IsNullOrWhiteSpace(_config.SelectedServerName) ? "<none>" : _config.SelectedServerName)}",
+            $"Theme: {_config.ThemeName}",
             $"Password Encryption: {(_config.EncryptPasswords ? $"enabled ({(_configEncryptionPassword.HasValue ? "unlocked" : "locked")})" : "disabled")}",
             $"Connection Timeout: {_config.Timeouts.ConnectionTimeoutSeconds}s",
             $"Command Timeout: {_config.Timeouts.CommandTimeoutSeconds}s",
@@ -373,6 +393,38 @@ internal sealed class TerminalGuiRunner
         ShowTextDialog("Config", string.Join(Environment.NewLine, lines));
     }
 
+    private void ShowThemeSelectionDialog()
+    {
+        var themeNames = TerminalThemeCatalog.GetThemeNames();
+        var selectedIndex = Math.Max(0, themeNames.IndexOf(_config.ThemeName));
+        var listView = CreateListView(themeNames, selectedIndex);
+        var selection = ShowListDialog("Theme", listView, "Apply");
+        if (selection != 0)
+        {
+            return;
+        }
+
+        var themeName = themeNames[Math.Clamp(listView.SelectedItem ?? selectedIndex, 0, themeNames.Count - 1)];
+        if (string.Equals(themeName, _config.ThemeName, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowInfoDialog("Theme", $"Theme is already set to '{themeName}'.");
+            return;
+        }
+
+        var result = WaitForTaskCompletion(
+            _service.UpdateThemePreferenceAsync(_configPath, GetConfigEncryptionPassword(), themeName, _cancellationToken),
+            "Theme",
+            "Saving theme preference...");
+        if (result.Succeeded)
+        {
+            _config.ThemeName = TerminalThemeCatalog.NormalizeThemeName(themeName);
+            ConfigureTheme(RequireApp(), _config.ThemeName);
+            RefreshMainTheme();
+        }
+
+        ShowResult(result);
+    }
+
     private void ShowAboutDialog()
     {
         var repoUrlField = new TextField
@@ -389,18 +441,19 @@ internal sealed class TerminalGuiRunner
         {
             Title = "About SQL Manager",
             Width = 96,
-            Height = 17,
+            Height = 24,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         var textView = CreateSelectableReadOnlyTextView(BuildAboutSummaryText(), wordWrap: true);
         textView.X = 1;
         textView.Y = 0;
         textView.Width = Dim.Fill(1);
-        textView.Height = 7;
+        textView.Height = 14;
         var repoUrlLabel = new Label
         {
             X = 1,
-            Y = 7,
+            Y = 14,
             Text = "GitHub Repository (selectable, Ctrl+C to copy):"
         };
 
@@ -485,6 +538,7 @@ internal sealed class TerminalGuiRunner
             Height = 23,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         dialog.Add(scoreLabel, controlsLabel, boardView);
         dialog.Buttons = [restartButton, closeButton];
@@ -635,6 +689,7 @@ internal sealed class TerminalGuiRunner
             Height = 23,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         dialog.Add(scoreLabel, controlsLabel, boardView);
         dialog.Buttons = [restartButton, closeButton];
@@ -775,6 +830,7 @@ internal sealed class TerminalGuiRunner
             Height = 28,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         dialog.Add(scoreLabel, controlsLabel, boardView);
         dialog.Buttons = [restartButton, closeButton];
@@ -1264,6 +1320,7 @@ internal sealed class TerminalGuiRunner
             Height = 20,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         AddField(dialog, 1, "Server Name:", serverField);
         AddField(dialog, 3, "Provider:", providerField);
@@ -1961,6 +2018,7 @@ internal sealed class TerminalGuiRunner
             Height = height,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         buildBody(dialog);
         dialog.DefaultAcceptView = runButton;
         var initialFocus = FindPreferredInitialFocus(dialog);
@@ -2032,6 +2090,7 @@ internal sealed class TerminalGuiRunner
             Height = 18,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         dialog.Add(content);
         dialog.Buttons = [primary, back];
 
@@ -2070,6 +2129,7 @@ internal sealed class TerminalGuiRunner
             Height = 24,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         var textView = CreateSelectableReadOnlyTextView(text);
         textView.X = 0;
         textView.Y = 0;
@@ -2089,6 +2149,9 @@ internal sealed class TerminalGuiRunner
     }
 
     private int ShowChoiceDialog(string title, string text, params string[] buttons)
+        => ShowChoiceDialog(title, text, TerminalThemeSurface.Dialog, buttons);
+
+    private int ShowChoiceDialog(string title, string text, TerminalThemeSurface surface, params string[] buttons)
     {
         ArgumentNullException.ThrowIfNull(buttons);
         if (buttons.Length == 0)
@@ -2104,6 +2167,7 @@ internal sealed class TerminalGuiRunner
             Height = size.Height,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, surface);
         var textView = CreateSelectableReadOnlyTextView(text, wordWrap: true);
         textView.X = 0;
         textView.Y = 0;
@@ -2147,10 +2211,10 @@ internal sealed class TerminalGuiRunner
     }
 
     private void ShowInfoDialog(string title, string message)
-        => ShowChoiceDialog(title, message, "OK");
+        => ShowChoiceDialog(title, message, TerminalThemeSurface.Dialog, "OK");
 
     private void ShowErrorDialog(string title, string message)
-        => ShowChoiceDialog(title, message, "OK");
+        => ShowChoiceDialog(title, message, TerminalThemeSurface.Error, "OK");
 
     private static Size CalculateMessageDialogSize(string text)
     {
@@ -2205,7 +2269,14 @@ internal sealed class TerminalGuiRunner
             string.Empty,
             $"Version: {AppVersion.DisplayVersion}",
             $"Built: {AppVersion.BuildDate}",
-            AppVersion.Copyright
+            AppVersion.Copyright,
+            string.Empty,
+            "Open source projects used in this app:",
+            "Terminal.Gui: terminal user interface framework",
+            "Spectre.Console: console rendering and formatting",
+            "Microsoft.Data.SqlClient: SQL Server connectivity",
+            "Npgsql: PostgreSQL connectivity",
+            "Konscious.Security.Cryptography.Argon2: password-based encryption support"
         ]);
 
     private void ShowUserEntriesDialog(ServerConfig server, string databaseName, IReadOnlyList<DatabaseUserRow> rows)
@@ -2251,6 +2322,7 @@ internal sealed class TerminalGuiRunner
             Height = 18,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         var textView = CreateSelectableReadOnlyTextView(details);
         textView.X = 0;
@@ -2343,6 +2415,7 @@ internal sealed class TerminalGuiRunner
             Height = 16,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         var textView = CreateSelectableReadOnlyTextView(details);
         textView.X = 0;
@@ -2413,6 +2486,7 @@ internal sealed class TerminalGuiRunner
             Height = 20,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
         var textView = CreateSelectableReadOnlyTextView(details);
         textView.X = 0;
@@ -2557,6 +2631,7 @@ internal sealed class TerminalGuiRunner
             Height = 10,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         AddField(dialog, 1, label, field);
         dialog.Buttons = [primary, back];
 
@@ -2713,6 +2788,7 @@ internal sealed class TerminalGuiRunner
             Height = 8,
             TabStop = TabBehavior.TabGroup
         };
+        ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         var messageLabel = new Label
         {
             X = 1,
@@ -2793,6 +2869,47 @@ internal sealed class TerminalGuiRunner
 
     private IApplication RequireApp()
         => _app ?? throw new InvalidOperationException("Terminal.Gui application is not initialized.");
+
+    private void ConfigureTheme(IApplication app, string? preferredThemeName)
+    {
+        _themeSchemes.Clear();
+        var driver = app.Driver;
+        var capability = driver?.ColorCapabilities is { } colorCapabilities
+            ? colorCapabilities.Capability
+            : ColorCapabilityLevel.NoColor;
+        if (!TerminalThemeCatalog.TryCreateSchemes(capability, preferredThemeName, out var schemes))
+        {
+            return;
+        }
+
+        foreach (var pair in schemes)
+        {
+            _themeSchemes[pair.Key] = pair.Value;
+        }
+    }
+
+    private void RefreshMainTheme()
+    {
+        if (_mainWindow is not null)
+        {
+            ApplyTheme(_mainWindow, TerminalThemeSurface.Runnable);
+            _mainWindow.SetNeedsDraw();
+        }
+
+        if (_mainMenuBar is not null)
+        {
+            ApplyTheme(_mainMenuBar, TerminalThemeSurface.Menu);
+            _mainMenuBar.SetNeedsDraw();
+        }
+    }
+
+    private void ApplyTheme(View view, TerminalThemeSurface surface)
+    {
+        if (_themeSchemes.TryGetValue(surface, out var scheme))
+        {
+            view.SetScheme(scheme);
+        }
+    }
 
     private void TryRequestApplicationExit()
     {

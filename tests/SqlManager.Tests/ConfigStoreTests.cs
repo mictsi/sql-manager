@@ -129,4 +129,37 @@ public sealed class ConfigStoreTests
             }
         }
     }
+
+    [Fact]
+    public async Task SaveAsync_EncryptedEnvelopePersistsThemeName()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-theme-envelope-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var config = new SqlManagerConfig
+            {
+                ThemeName = "Obsidian",
+                EncryptPasswords = true,
+                EncryptionKey = "key",
+                EncryptedPayload = "payload"
+            };
+
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, config, CancellationToken.None);
+
+            using var document = JsonDocument.Parse(await File.ReadAllTextAsync(filePath));
+            Assert.Equal("Obsidian", document.RootElement.GetProperty("themeName").GetString());
+
+            var loaded = await store.LoadAsync(filePath, CancellationToken.None);
+            Assert.Equal("Obsidian", loaded.ThemeName);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
 }
