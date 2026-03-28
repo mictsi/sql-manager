@@ -55,3 +55,4 @@ CodeCoverage/
 TestResult.xml
 nunit-*.xml
 
+.dotnet-cli/
