@@ -19,6 +19,7 @@ internal static class HelpContent
         "sql-manager add-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>",
         "sql-manager remove-role --database-name <database> --user-name <user> --roles db_reader --admin-password <password>",
         "sql-manager show-users --database-name <database> --admin-password <password>",
+        "sql-manager test-user-login --database-name <database> --user-name <user> [--user-password <password>]",
         "sql-manager remove-user --user-name <user> --database-name <database> [--database-name <database>] [--remove-server-login] --removal-scope Database|Server|Both --admin-password <password>",
         "sql-manager update-password --user-name <user> --admin-password <password> [--new-user-password <password>]",
         "sql-manager enable-config-encryption --config-path <path> [--encryption-password <password>]",

@@ -28,7 +28,7 @@ public sealed class ConfigEncryptionTests
                                                             "username": "lab_reader",
                                                             "password": "reader-password",
                                                             "roles": ["db_datareader"],
-                                                            "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;"
+                                                            "connectionString": "Server=tcp:sql01.contoso.local,1433;Database=LabDB;Persist Security Info=False;User ID=lab_reader;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;"
                                                         }
                                                     ]
                                                 }
@@ -131,7 +131,7 @@ public sealed class ConfigEncryptionTests
             var unlockedUser = Assert.Single(Assert.Single(unlockedServer.Databases).Users);
             Assert.Equal("reader-password", unlockedUser.Password);
             Assert.True(unlockedUser.Encrypted);
-            Assert.Contains("Password=********", unlockedUser.ConnectionString, StringComparison.Ordinal);
+            Assert.Contains("Password=;", unlockedUser.ConnectionString, StringComparison.Ordinal);
         }
         finally
         {
@@ -176,7 +176,7 @@ public sealed class ConfigEncryptionTests
             var user = Assert.Single(Assert.Single(server.Databases).Users);
             Assert.False(user.Encrypted);
             Assert.Equal("reader-password", user.Password);
-            Assert.Contains("Password=********", user.ConnectionString, StringComparison.Ordinal);
+            Assert.Contains("Password=;", user.ConnectionString, StringComparison.Ordinal);
         }
         finally
         {
@@ -225,7 +225,7 @@ public sealed class ConfigEncryptionTests
                                                             "password": "{{protector.EncryptSecret("reader-password", encryptionPassword)}}",
                                                             "encrypted": true,
                                                             "roles": ["db_datareader"],
-                                                            "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;"
+                                                            "connectionString": "Server=tcp:sql01.contoso.local,1433;Database=LabDB;Persist Security Info=False;User ID=lab_reader;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;"
                                                         }
                                                     ]
                                                 }
@@ -346,7 +346,7 @@ public sealed class ConfigEncryptionTests
                                                             "password": "{{protector.EncryptSecret("reader-password", encryptionPassword)}}",
                                                             "encrypted": true,
                                                             "roles": ["db_datareader"],
-                                                            "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;"
+                                                            "connectionString": "Server=tcp:sql01.contoso.local,1433;Database=LabDB;Persist Security Info=False;User ID=lab_reader;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;"
                                                         }
                                                     ]
                                                 }
@@ -434,7 +434,7 @@ public sealed class ConfigEncryptionTests
                                     Username = "lab_reader",
                                     Password = "reader-password",
                                     Roles = ["db_datareader"],
-                                    ConnectionString = "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;",
+                                    ConnectionString = "Server=tcp:sql01.contoso.local,1433;Database=LabDB;Persist Security Info=False;User ID=lab_reader;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;",
                                     VersionHistory =
                                     [
                                         new EntryVersion
@@ -497,6 +497,42 @@ public sealed class ConfigEncryptionTests
         }
     }
 
+    [Fact]
+    public async Task TestUserLoginAsync_FailsWhenNoPasswordIsStoredOrSupplied()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-test-login-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var config = CreatePlaintextConfig();
+            config.Servers[0].Databases[0].Users[0].Password = string.Empty;
+
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, config, CancellationToken.None);
+
+            var service = CreateService();
+            var result = await service.TestUserLoginAsync(new CommandOptions
+            {
+                Command = CommandKind.TestUserLogin,
+                ConfigPath = filePath,
+                ServerName = "sql01.contoso.local",
+                DatabaseName = "LabDB",
+                UserName = "lab_reader"
+            }, CancellationToken.None);
+
+            Assert.False(result.Succeeded);
+            Assert.Equal(2, result.ExitCode);
+            Assert.Equal("No password is stored for this user. Supply --user-password to test the login.", result.Message);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
     private static SqlManagerService CreateService()
         => new(new ConfigStore(), new ConfigPasswordProtector(), new PasswordGenerator(), new SqlServerGateway(), new PostgreSqlGateway());
 
@@ -525,7 +561,7 @@ public sealed class ConfigEncryptionTests
                                     Username = "lab_reader",
                                     Password = "reader-password",
                                     Roles = ["db_datareader"],
-                                    ConnectionString = "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;"
+                                    ConnectionString = "Server=tcp:sql01.contoso.local,1433;Database=LabDB;Persist Security Info=False;User ID=lab_reader;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;"
                                 }
                             ]
                         }

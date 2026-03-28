@@ -186,6 +186,8 @@ internal sealed class SqlManagerApplication
 
                 return result.ExitCode;
             }
+            case CommandKind.TestUserLogin:
+                return await RenderSimpleResultAsync(_service.TestUserLoginAsync(options, cancellationToken));
             case CommandKind.RemoveUser:
                 return await RenderSimpleResultAsync(_service.RemoveUserAsync(options, cancellationToken));
             case CommandKind.UpdatePassword:
@@ -258,6 +260,12 @@ internal sealed class SqlManagerApplication
             {
                 options.NewUserPassword = _ui.PromptSecret("User password:");
             }
+        }
+
+        if (options.Command == CommandKind.TestUserLogin && string.IsNullOrWhiteSpace(options.NewUserPassword))
+        {
+            var suppliedPassword = _ui.PromptSecret("SQL user password (leave blank to use stored password):", allowEmpty: true);
+            options.NewUserPassword = string.IsNullOrWhiteSpace(suppliedPassword) ? null : suppliedPassword;
         }
 
         await Task.CompletedTask;

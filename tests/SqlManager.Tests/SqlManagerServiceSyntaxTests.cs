@@ -17,7 +17,7 @@ public sealed class SqlManagerServiceSyntaxTests
             "Secret123!");
 
         Assert.Equal(
-            "Server=sql01.contoso.local,1433;Database=LabDb;User ID=app_user;Password=********;Encrypt=True;TrustServerCertificate=True;",
+            "Server=tcp:sql01.contoso.local,1433;Database=LabDb;Persist Security Info=False;User ID=app_user;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;",
             connectionString);
     }
 

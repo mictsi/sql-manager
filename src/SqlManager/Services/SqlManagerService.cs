@@ -625,6 +625,35 @@ END
             return OperationResult<IReadOnlyList<DatabaseUserRow>>.Success(rows, message);
         });
 
+    public Task<OperationResult> TestUserLoginAsync(CommandOptions options, CancellationToken cancellationToken)
+        => ExecuteAsync(async () =>
+        {
+            var context = await ResolveServerContextAsync(options, persistSelection: false, cancellationToken, requireAdminUsername: false);
+            var databaseName = Require(options.DatabaseName, "TestUserLogin requires DatabaseName.");
+            var userName = Require(options.UserName, "TestUserLogin requires UserName.");
+            var password = ResolveUserLoginPassword(options.NewUserPassword, context.ServerConfig, databaseName, userName);
+            var testValue = await ExecuteScalarIntAsync(
+                context.Provider,
+                context.ServerName,
+                context.Port,
+                userName,
+                password,
+                "SELECT 1;",
+                databaseName,
+                context.Timeouts,
+                cancellationToken);
+
+            if (testValue != 1)
+            {
+                throw new UserInputException($"User login test returned an unexpected result for '{userName}' on '{databaseName}'.");
+            }
+
+            return OperationResult.Success(
+                $"Validated login for '{userName}' on database '{databaseName}'.",
+                $"Provider: {SqlProviders.GetDisplayName(context.Provider)}",
+                $"Connection string: {BuildConnectionString(context.Provider, context.ServerName, context.Port, databaseName, userName, password)}");
+        });
+
     public Task<OperationResult> RemoveUserAsync(CommandOptions options, CancellationToken cancellationToken)
         => ExecuteAsync(async () =>
         {
@@ -709,7 +738,7 @@ END
                     : "Password was set from the supplied value.");
         });
 
-    private async Task<ResolvedServerContext> ResolveServerContextAsync(CommandOptions options, bool persistSelection, CancellationToken cancellationToken)
+    private async Task<ResolvedServerContext> ResolveServerContextAsync(CommandOptions options, bool persistSelection, CancellationToken cancellationToken, bool requireAdminUsername = true)
     {
         var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
         var serverName = options.ServerName;
@@ -739,7 +768,7 @@ END
         var adminPassword = string.IsNullOrWhiteSpace(options.AdminPassword)
             ? serverConfig?.AdminPassword
             : options.AdminPassword;
-        if (string.IsNullOrWhiteSpace(adminUsername))
+        if (requireAdminUsername && string.IsNullOrWhiteSpace(adminUsername))
         {
             throw new UserInputException("AdminUsername is required for this operation.");
         }
@@ -766,7 +795,7 @@ END
             await SaveEditableConfigAsync(options.ConfigPath, config, options.EncryptionPassword, cancellationToken);
         }
 
-        return new ResolvedServerContext(config, serverConfig, serverName, provider, port, adminDatabase!, adminUsername, adminPassword ?? string.Empty, config.Timeouts);
+        return new ResolvedServerContext(config, serverConfig, serverName, provider, port, adminDatabase!, adminUsername ?? string.Empty, adminPassword ?? string.Empty, config.Timeouts);
     }
 
     private async Task<SqlManagerConfig> LoadDisplayConfigAsync(string configPath, string? encryptionPassword, CancellationToken cancellationToken)
@@ -1369,7 +1398,7 @@ END
         return user;
     }
 
-    private static string GetStoredPasswordForUser(ServerConfig? serverConfig, string userName)
+    private static string GetStoredPasswordForUser(ServerConfig? serverConfig, string userName, string? databaseName = null)
     {
         if (serverConfig is null)
         {
@@ -1378,6 +1407,12 @@ END
 
         foreach (var database in serverConfig.Databases)
         {
+            if (!string.IsNullOrWhiteSpace(databaseName)
+                && !database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             var password = database.Users.FirstOrDefault(user => user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(user.Password))?.Password;
             if (!string.IsNullOrWhiteSpace(password))
             {
@@ -1487,6 +1522,28 @@ END
         return new ResolvedPassword(_passwordGenerator.Generate(), "Password was generated automatically.");
     }
 
+    private static string ResolveUserLoginPassword(string? providedPassword, ServerConfig? serverConfig, string databaseName, string userName)
+    {
+        if (!string.IsNullOrWhiteSpace(providedPassword))
+        {
+            return providedPassword!;
+        }
+
+        var storedPassword = GetStoredPasswordForUser(serverConfig, userName, databaseName);
+        if (!string.IsNullOrWhiteSpace(storedPassword))
+        {
+            return storedPassword;
+        }
+
+        storedPassword = GetStoredPasswordForUser(serverConfig, userName);
+        if (!string.IsNullOrWhiteSpace(storedPassword))
+        {
+            return storedPassword;
+        }
+
+        throw new UserInputException("No password is stored for this user. Supply --user-password to test the login.");
+    }
+
     private async Task ExecuteNonQueryAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
     {
         if (IsSqlServer(context.Provider))
@@ -1500,12 +1557,17 @@ END
 
     private async Task<int> ExecuteScalarIntAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
     {
-        if (IsSqlServer(context.Provider))
+        return await ExecuteScalarIntAsync(context.Provider, context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+    }
+
+    private async Task<int> ExecuteScalarIntAsync(string provider, string serverName, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    {
+        if (IsSqlServer(provider))
         {
-            return await _sqlServerGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+            return await _sqlServerGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, cancellationToken);
         }
 
-        return await _postgreSqlGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+        return await _postgreSqlGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> LoadServerDatabaseNamesAsync(ResolvedServerContext context, string adminPassword, CancellationToken cancellationToken)
@@ -1914,15 +1976,35 @@ ORDER BY member.rolname;
 
     private static string BuildConnectionString(string provider, string server, int? port, string database, string username, string? password)
     {
-        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
         if (IsSqlServer(provider))
         {
-            var dataSource = port is > 0 ? $"{server},{port.Value}" : server;
-            return $"Server={dataSource};Database={database};User ID={username};Password={resolvedPassword};Encrypt=True;TrustServerCertificate=True;";
+            var sqlServerTarget = BuildSqlServerConnectionTarget(server, port);
+            return $"Server={sqlServerTarget};Database={database};Persist Security Info=False;User ID={username};Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;";
         }
 
+        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
         var portSegment = port is > 0 ? $";Port={port.Value}" : string.Empty;
         return $"Host={server}{portSegment};Database={database};Username={username};Password={resolvedPassword};Ssl Mode=Require;";
+    }
+
+    private static string BuildSqlServerConnectionTarget(string server, int? port)
+    {
+        var normalizedServer = server.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase)
+            ? server
+            : $"tcp:{server}";
+        if (port is > 0)
+        {
+            if (normalizedServer.Contains(',', StringComparison.Ordinal))
+            {
+                return normalizedServer;
+            }
+
+            return $"{normalizedServer},{port.Value}";
+        }
+
+        return normalizedServer.Contains(',', StringComparison.Ordinal)
+            ? normalizedServer
+            : $"{normalizedServer},1433";
     }
 
     private static bool IsSqlServer(string provider)

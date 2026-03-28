@@ -2,6 +2,8 @@ namespace SqlManager.Tests;
 
 public sealed class PasswordGeneratorTests
 {
+    private const string AllowedSpecialCharacters = "!@#$:./?=+-_()";
+
     [Fact]
     public void Generate_DefaultLength_ReturnsPasswordWithAllRequiredCharacterGroups()
     {
@@ -13,7 +15,8 @@ public sealed class PasswordGeneratorTests
         Assert.Contains(password, character => char.IsUpper(character));
         Assert.Contains(password, character => char.IsLower(character));
         Assert.Contains(password, character => char.IsDigit(character));
-        Assert.Contains(password, character => !char.IsLetterOrDigit(character));
+        Assert.Contains(password, character => AllowedSpecialCharacters.Contains(character));
+        Assert.DoesNotContain(password, character => !char.IsLetterOrDigit(character) && !AllowedSpecialCharacters.Contains(character));
     }
 
     [Fact]

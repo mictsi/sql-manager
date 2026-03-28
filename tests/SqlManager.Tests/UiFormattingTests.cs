@@ -115,6 +115,28 @@ public sealed class UiFormattingTests
     }
 
     [Fact]
+    public void BuildConnectionStringPreview_UsesAzureSqlStyleFormat()
+    {
+        var server = new ServerConfig
+        {
+            ServerName = "azimondo.swedencentral.cloudapp.azure.com",
+            Provider = SqlProviders.SqlServer,
+            Port = 1433
+        };
+
+        var preview = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildConnectionStringPreview",
+            server,
+            "securejournal",
+            "securejournal");
+
+        Assert.Equal(
+            "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Database=securejournal;Persist Security Info=False;User ID=securejournal;Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;",
+            preview);
+    }
+
+    [Fact]
     public void HelpContent_CommandReference_IncludesHelpCommandAndDefaultPath()
     {
         var text = HelpContent.BuildCommandReferenceText("C:/temp/sql-config.json");

@@ -89,4 +89,19 @@ public sealed class CommandLineParserTests
         Assert.Equal("ComplexPass!123", result.Value.Options.EncryptionPassword);
         Assert.Equal("sql-config.json", result.Value.Options.ConfigPath);
     }
+
+    [Fact]
+    public void Parse_ReadsTestUserLoginCommandAndUserPasswordAlias()
+    {
+        var result = CommandLineParser.Parse(
+            ["test-user-login", "--database-name", "securejournal", "--user-name", "securejournal", "--user-password", "Secret123!"],
+            "sql-config.json");
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.Value);
+        Assert.Equal(CommandKind.TestUserLogin, result.Value!.Command);
+        Assert.Equal("securejournal", result.Value.Options.DatabaseName);
+        Assert.Equal("securejournal", result.Value.Options.UserName);
+        Assert.Equal("Secret123!", result.Value.Options.NewUserPassword);
+    }
 }

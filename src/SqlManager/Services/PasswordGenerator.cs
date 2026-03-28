@@ -7,7 +7,7 @@ internal sealed class PasswordGenerator
     private const string Upper = "ABCDEFGHJKLMNPQRSTUVWXYZ";
     private const string Lower = "abcdefghijkmnopqrstuvwxyz";
     private const string Digits = "23456789";
-    private const string Special = "!@#$%^&*()-_=+[]{}:?";
+    private const string Special = "!@#$:./?=+-_()";
 
     public string Generate(int length = 20)
     {

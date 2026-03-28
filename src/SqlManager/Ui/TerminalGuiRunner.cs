@@ -138,6 +138,7 @@ internal sealed class TerminalGuiRunner
             ("Create User", (Action)ShowCreateUserDialog),
             ("Manage Roles", (Action)ShowManageRolesDialog),
             ("Show Users", (Action)ShowUsersDialog),
+            ("Test User Login", (Action)ShowTestUserLoginDialog),
             ("Remove User", (Action)ShowRemoveUserDialog),
             ("Update Password", (Action)ShowUpdatePasswordDialog)
         };
@@ -1600,6 +1601,58 @@ internal sealed class TerminalGuiRunner
         }
     }
 
+    private void ShowTestUserLoginDialog()
+    {
+        var server = RequireActiveServer();
+        if (server is null)
+        {
+            return;
+        }
+
+        var databaseName = PromptDatabaseName(server, "Test User Login");
+        if (string.IsNullOrWhiteSpace(databaseName))
+        {
+            return;
+        }
+
+        var userName = PromptKnownUserName(server, "Test User Login", databaseName);
+        if (string.IsNullOrWhiteSpace(userName))
+        {
+            return;
+        }
+
+        var passwordField = CreateSecretField(GetConfiguredUserPassword(server, databaseName, userName));
+        var result = ShowServerDialog(
+            "Test User Login",
+            server,
+            14,
+            "Test Login",
+            dialog =>
+            {
+                dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
+                dialog.Add(new Label { X = 1, Y = 3, Text = $"User: {userName}" });
+                AddField(dialog, 5, "Password:", passwordField);
+            },
+            () => ExecuteDatabaseSaveOperation(
+                _service.TestUserLoginAsync(new CommandOptions
+                {
+                    Command = CommandKind.TestUserLogin,
+                    ConfigPath = _configPath,
+                    EncryptionPassword = GetConfigEncryptionPassword(),
+                    ServerName = server.ServerName,
+                    DatabaseName = databaseName,
+                    UserName = userName,
+                    NewUserPassword = GetText(passwordField)
+                }, _cancellationToken),
+                title: "Test User Login",
+                message: "Testing user login..."));
+
+        if (result?.Result is not null)
+        {
+            ShowResult(result.Result);
+        }
+    }
+
     private void ShowRemoveUserDialog()
     {
         var server = RequireActiveServer();
@@ -2209,7 +2262,16 @@ internal sealed class TerminalGuiRunner
     }
 
     private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
-        => $"{(SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer ? "Server" : "Host")}={server.ServerName};Database={databaseName};User={userName};Password=<PASSWORD_REQUIRED>;";
+    {
+        if (SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer)
+        {
+            var target = BuildSqlServerConnectionTarget(server.ServerName, server.Port);
+            return $"Server={target};Database={databaseName};Persist Security Info=False;User ID={userName};Password=;Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;";
+        }
+
+        var portSegment = server.Port is > 0 ? $";Port={server.Port.Value}" : string.Empty;
+        return $"Host={server.ServerName}{portSegment};Database={databaseName};Username={userName};Password=<PASSWORD_REQUIRED>;Ssl Mode=Require;";
+    }
 
     private void ShowDatabaseEntriesDialog(ServerConfig server, IReadOnlyList<string> databaseNames)
     {
@@ -2419,9 +2481,10 @@ internal sealed class TerminalGuiRunner
             : selected;
     }
 
-    private string? PromptKnownUserName(ServerConfig server, string title)
+    private string? PromptKnownUserName(ServerConfig server, string title, string? databaseName = null)
     {
         var userNames = server.Databases
+            .Where(database => string.IsNullOrWhiteSpace(databaseName) || database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))
             .SelectMany(database => database.Users.Select(user => user.Username))
             .Where(name => !string.IsNullOrWhiteSpace(name))
             .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -2445,6 +2508,14 @@ internal sealed class TerminalGuiRunner
             ? ShowInputDialog(title, "User Name:", "OK")
             : selected;
     }
+
+    private static string GetConfiguredUserPassword(ServerConfig server, string databaseName, string userName)
+        => server.Databases
+            .FirstOrDefault(database => database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))?
+            .Users
+            .FirstOrDefault(user => user.Username.Equals(userName, StringComparison.OrdinalIgnoreCase))?
+            .Password
+            ?? string.Empty;
 
     private string? ShowInputDialog(string title, string label, string primaryButtonText, string backButtonText = "Back")
     {
@@ -2893,6 +2964,26 @@ internal sealed class TerminalGuiRunner
             && view.Enabled
             && view.CanFocus
             && view.TabStop is not null and not TabBehavior.NoStop;
+
+    private static string BuildSqlServerConnectionTarget(string server, int? port)
+    {
+        var normalizedServer = server.StartsWith("tcp:", StringComparison.OrdinalIgnoreCase)
+            ? server
+            : $"tcp:{server}";
+        if (port is > 0)
+        {
+            if (normalizedServer.Contains(',', StringComparison.Ordinal))
+            {
+                return normalizedServer;
+            }
+
+            return $"{normalizedServer},{port.Value}";
+        }
+
+        return normalizedServer.Contains(',', StringComparison.Ordinal)
+            ? normalizedServer
+            : $"{normalizedServer},1433";
+    }
 
     private static View CreateScrollableViewport(int viewportHeight, int contentHeight)
     {
