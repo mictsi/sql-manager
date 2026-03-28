@@ -134,6 +134,33 @@ public sealed class UiFormattingTests
         Assert.Contains("Help: open version details", text);
     }
 
+    [Fact]
+    public void CalculateMessageDialogSize_UsesReadableMinimums()
+    {
+        var size = InvokePrivateStatic<System.Drawing.Size>(
+            typeof(TerminalGuiRunner),
+            "CalculateMessageDialogSize",
+            "copy me");
+
+        Assert.Equal(48, size.Width);
+        Assert.Equal(8, size.Height);
+    }
+
+    [Fact]
+    public void CalculateMessageDialogSize_ClampsLargeContent()
+    {
+        var longLine = new string('x', 200);
+        var text = string.Join(Environment.NewLine, Enumerable.Repeat(longLine, 40));
+
+        var size = InvokePrivateStatic<System.Drawing.Size>(
+            typeof(TerminalGuiRunner),
+            "CalculateMessageDialogSize",
+            text);
+
+        Assert.Equal(96, size.Width);
+        Assert.Equal(24, size.Height);
+    }
+
     private static T InvokePrivateStatic<T>(Type type, string methodName, params object?[] arguments)
     {
         var method = type.GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static);

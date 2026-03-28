@@ -64,7 +64,7 @@ internal sealed class TerminalGuiRunner
                 "Loading configuration...");
             if (!summary.Succeeded || summary.Value is null)
             {
-                MessageBox.ErrorQuery(app, "SQL Manager", summary.Message, "OK");
+                ShowErrorDialog("SQL Manager", summary.Message);
                 return summary.ExitCode;
             }
 
@@ -363,10 +363,9 @@ internal sealed class TerminalGuiRunner
             X = 1,
             Y = 8,
             Width = Dim.Fill(1),
-            Text = AppVersion.RepositoryUrl,
-            ReadOnly = true,
-            TabStop = TabBehavior.TabStop
+            Text = AppVersion.RepositoryUrl
         };
+        ConfigureSelectableReadOnlyField(repoUrlField);
         var copyButton = new Button { Text = "Copy URL (Ctrl+C)" };
         var closeButton = new Button { Text = "Close (Esc)" };
         var dialog = new Dialog
@@ -376,17 +375,11 @@ internal sealed class TerminalGuiRunner
             Height = 17,
             TabStop = TabBehavior.TabGroup
         };
-        var textView = new TextView
-        {
-            X = 1,
-            Y = 0,
-            Width = Dim.Fill(1),
-            Height = 7,
-            ReadOnly = true,
-            WordWrap = true,
-            Text = BuildAboutSummaryText(),
-            TabStop = TabBehavior.NoStop
-        };
+        var textView = CreateSelectableReadOnlyTextView(BuildAboutSummaryText(), wordWrap: true);
+        textView.X = 1;
+        textView.Y = 0;
+        textView.Width = Dim.Fill(1);
+        textView.Height = 7;
         var repoUrlLabel = new Label
         {
             X = 1,
@@ -402,11 +395,11 @@ internal sealed class TerminalGuiRunner
             var clipboard = RequireApp().Clipboard;
             if (clipboard is not null && clipboard.TrySetClipboardData(AppVersion.RepositoryUrl))
             {
-                MessageBox.Query(RequireApp(), "About SQL Manager", "Repository URL copied to clipboard.", "OK");
+                ShowInfoDialog("About SQL Manager", "Repository URL copied to clipboard.");
                 return;
             }
 
-            MessageBox.ErrorQuery(RequireApp(), "About SQL Manager", "Clipboard is not available. Select the URL field and copy it manually.", "OK");
+            ShowErrorDialog("About SQL Manager", "Clipboard is not available. Select the URL field and copy it manually.");
         }
 
         copyButton.Accepting += (_, args) =>
@@ -419,14 +412,7 @@ internal sealed class TerminalGuiRunner
             args.Handled = true;
             dialog.RequestStop();
         };
-        dialog.KeyDown += (_, key) =>
-        {
-            if (key == Key.Esc)
-            {
-                key.Handled = true;
-                dialog.RequestStop();
-            }
-        };
+        ConfigureEscapeToClose(dialog, dialog.RequestStop);
         repoUrlField.KeyDown += (_, key) =>
         {
             if (key == Key.C.WithCtrl)
@@ -912,8 +898,7 @@ internal sealed class TerminalGuiRunner
 
         if (_configEncryptionPassword.HasValue)
         {
-            var action = MessageBox.Query(
-                RequireApp(),
+            var action = ShowChoiceDialog(
                 "Encrypt Passwords",
                 "encryptPasswords is enabled and currently unlocked.",
                 "Turn Off",
@@ -930,14 +915,13 @@ internal sealed class TerminalGuiRunner
             {
                 _configEncryptionPassword.Clear();
                 ReloadAndRefresh();
-                MessageBox.Query(RequireApp(), "Encrypt Passwords", "Stored passwords are locked again for this session.", "OK");
+                ShowInfoDialog("Encrypt Passwords", "Stored passwords are locked again for this session.");
             }
 
             return;
         }
 
-        var lockedAction = MessageBox.Query(
-            RequireApp(),
+        var lockedAction = ShowChoiceDialog(
             "Encrypt Passwords",
             "encryptPasswords is enabled and currently locked.",
             "Unlock",
@@ -1147,7 +1131,7 @@ internal sealed class TerminalGuiRunner
     {
         if (_config.Servers.Count == 0)
         {
-            MessageBox.ErrorQuery(RequireApp(), "Select Active Server", "No servers are configured.", "OK");
+            ShowErrorDialog("Select Active Server", "No servers are configured.");
             return;
         }
 
@@ -1225,7 +1209,7 @@ internal sealed class TerminalGuiRunner
     {
         if (_config.Servers.Count == 0)
         {
-            MessageBox.ErrorQuery(RequireApp(), "Edit Server", "No servers are configured.", "OK");
+            ShowErrorDialog("Edit Server", "No servers are configured.");
             return;
         }
 
@@ -1334,11 +1318,11 @@ internal sealed class TerminalGuiRunner
             var password = GetText(adminPasswordField);
             if (string.IsNullOrWhiteSpace(password))
             {
-                MessageBox.ErrorQuery(RequireApp(), "Show Password", "Password is not available in the current config view.", "OK");
+                ShowErrorDialog("Show Password", "Password is not available in the current config view.");
                 return;
             }
 
-            MessageBox.Query(RequireApp(), $"Password: {GetText(serverField)}", password, "OK");
+            ShowTextDialog($"Password: {GetText(serverField)}", password);
         };
         versionHistoryButton.Accepting += (_, args) =>
         {
@@ -1535,7 +1519,7 @@ internal sealed class TerminalGuiRunner
 
         if (server.Databases.Count == 0)
         {
-            MessageBox.ErrorQuery(RequireApp(), "Create User", "No configured databases were found. Sync the server or create a database first.", "OK");
+            ShowErrorDialog("Create User", "No configured databases were found. Sync the server or create a database first.");
             return;
         }
 
@@ -1552,7 +1536,7 @@ internal sealed class TerminalGuiRunner
 
         if (server.Databases.Count == 0)
         {
-            MessageBox.ErrorQuery(RequireApp(), "Manage Roles", "No configured databases were found. Sync the server or create a database first.", "OK");
+            ShowErrorDialog("Manage Roles", "No configured databases were found. Sync the server or create a database first.");
             return;
         }
 
@@ -1930,6 +1914,11 @@ internal sealed class TerminalGuiRunner
             result = null;
             dialog.RequestStop();
         };
+        ConfigureEscapeToClose(dialog, () =>
+        {
+            result = null;
+            dialog.RequestStop();
+        });
 
         if (initialFocus is not null)
         {
@@ -1979,6 +1968,11 @@ internal sealed class TerminalGuiRunner
             result = 1;
             dialog.RequestStop();
         };
+        ConfigureEscapeToClose(dialog, () =>
+        {
+            result = 1;
+            dialog.RequestStop();
+        });
 
         content.SetFocus();
         RequireApp().Run(dialog);
@@ -1996,17 +1990,11 @@ internal sealed class TerminalGuiRunner
             Height = 24,
             TabStop = TabBehavior.TabGroup
         };
-        var textView = new TextView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-            ReadOnly = true,
-            WordWrap = false,
-            Text = text,
-            TabStop = TabBehavior.TabStop
-        };
+        var textView = CreateSelectableReadOnlyTextView(text);
+        textView.X = 0;
+        textView.Y = 0;
+        textView.Width = Dim.Fill();
+        textView.Height = Dim.Fill(1);
         dialog.Add(textView);
         dialog.Buttons = [closeButton];
         closeButton.Accepting += (_, args) =>
@@ -2014,10 +2002,120 @@ internal sealed class TerminalGuiRunner
             args.Handled = true;
             dialog.RequestStop();
         };
+        ConfigureEscapeToClose(dialog, dialog.RequestStop);
         textView.SetFocus();
         RequireApp().Run(dialog);
         dialog.Dispose();
     }
+
+    private int ShowChoiceDialog(string title, string text, params string[] buttons)
+    {
+        ArgumentNullException.ThrowIfNull(buttons);
+        if (buttons.Length == 0)
+        {
+            throw new ArgumentException("At least one button is required.", nameof(buttons));
+        }
+
+        var size = CalculateMessageDialogSize(text);
+        var dialog = new Dialog
+        {
+            Title = title,
+            Width = size.Width,
+            Height = size.Height,
+            TabStop = TabBehavior.TabGroup
+        };
+        var textView = CreateSelectableReadOnlyTextView(text, wordWrap: true);
+        textView.X = 0;
+        textView.Y = 0;
+        textView.Width = Dim.Fill();
+        textView.Height = Dim.Fill(1);
+        dialog.Add(textView);
+
+        var buttonViews = buttons
+            .Select((label, index) => new Button
+            {
+                Text = label,
+                IsDefault = index == 0
+            })
+            .ToArray();
+        dialog.Buttons = buttonViews;
+        dialog.DefaultAcceptView = buttonViews[0];
+
+        var result = -1;
+        for (var index = 0; index < buttonViews.Length; index++)
+        {
+            var capturedIndex = index;
+            buttonViews[index].Accepting += (_, args) =>
+            {
+                args.Handled = true;
+                result = capturedIndex;
+                dialog.RequestStop();
+            };
+        }
+
+        ConfigureEscapeToClose(dialog, () =>
+        {
+            result = -1;
+            dialog.RequestStop();
+        });
+
+        textView.DefaultAcceptView = buttonViews[0];
+        textView.SetFocus();
+        RequireApp().Run(dialog);
+        dialog.Dispose();
+        return result;
+    }
+
+    private void ShowInfoDialog(string title, string message)
+        => ShowChoiceDialog(title, message, "OK");
+
+    private void ShowErrorDialog(string title, string message)
+        => ShowChoiceDialog(title, message, "OK");
+
+    private static Size CalculateMessageDialogSize(string text)
+    {
+        var normalized = string.IsNullOrEmpty(text)
+            ? string.Empty
+            : text.Replace("\r\n", "\n", StringComparison.Ordinal);
+        var lines = normalized.Split('\n');
+        var longestLineLength = lines.Length == 0 ? 0 : lines.Max(line => line.Length);
+        var width = Math.Clamp(longestLineLength + 8, 48, 96);
+        var height = Math.Clamp(lines.Length + 7, 8, 24);
+        return new Size(width, height);
+    }
+
+    private static TextView CreateSelectableReadOnlyTextView(string text, bool wordWrap = false)
+        => new()
+        {
+            ReadOnly = true,
+            WordWrap = wordWrap,
+            Text = text,
+            TabStop = TabBehavior.TabStop,
+            CanFocus = true,
+            MousePositionTracking = true,
+            SelectWordOnlyOnDoubleClick = false
+        };
+
+    private static void ConfigureSelectableReadOnlyField(TextField field)
+    {
+        field.ReadOnly = true;
+        field.CanFocus = true;
+        field.TabStop = TabBehavior.TabStop;
+        field.MousePositionTracking = true;
+        field.SelectWordOnlyOnDoubleClick = false;
+    }
+
+    private static void ConfigureEscapeToClose(Dialog dialog, Action onEscape)
+        => dialog.KeyDown += (_, key) =>
+        {
+            if (key.NoCtrl.NoAlt.NoShift != Key.Esc)
+            {
+                return;
+            }
+
+            key.Handled = true;
+            onEscape();
+        };
 
     private static string BuildAboutSummaryText()
         => string.Join(Environment.NewLine,
@@ -2074,17 +2172,11 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
 
-        var textView = new TextView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-            ReadOnly = true,
-            WordWrap = false,
-            Text = details,
-            TabStop = TabBehavior.TabStop
-        };
+        var textView = CreateSelectableReadOnlyTextView(details);
+        textView.X = 0;
+        textView.Y = 0;
+        textView.Width = Dim.Fill();
+        textView.Height = Dim.Fill(1);
         dialog.Add(textView);
         dialog.Buttons = [showPasswordButton, versionHistoryButton, closeButton];
 
@@ -2093,11 +2185,11 @@ internal sealed class TerminalGuiRunner
             args.Handled = true;
             if (trackedUser is null || string.IsNullOrWhiteSpace(trackedUser.Password))
             {
-                MessageBox.ErrorQuery(RequireApp(), "Show Password", "Password is not available in the current config view.", "OK");
+                ShowErrorDialog("Show Password", "Password is not available in the current config view.");
                 return;
             }
 
-            MessageBox.Query(RequireApp(), $"Password: {row.UserName}", trackedUser.Password, "OK");
+            ShowTextDialog($"Password: {row.UserName}", trackedUser.Password);
         };
         versionHistoryButton.Accepting += (_, args) =>
         {
@@ -2110,6 +2202,7 @@ internal sealed class TerminalGuiRunner
             dialog.RequestStop();
         };
 
+        ConfigureEscapeToClose(dialog, dialog.RequestStop);
         textView.SetFocus();
         RequireApp().Run(dialog);
         dialog.Dispose();
@@ -2162,17 +2255,11 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
 
-        var textView = new TextView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-            ReadOnly = true,
-            WordWrap = false,
-            Text = details,
-            TabStop = TabBehavior.TabStop
-        };
+        var textView = CreateSelectableReadOnlyTextView(details);
+        textView.X = 0;
+        textView.Y = 0;
+        textView.Width = Dim.Fill();
+        textView.Height = Dim.Fill(1);
         dialog.Add(textView);
         dialog.Buttons = [versionHistoryButton, closeButton];
 
@@ -2187,6 +2274,7 @@ internal sealed class TerminalGuiRunner
             dialog.RequestStop();
         };
 
+        ConfigureEscapeToClose(dialog, dialog.RequestStop);
         textView.SetFocus();
         RequireApp().Run(dialog);
         dialog.Dispose();
@@ -2196,7 +2284,7 @@ internal sealed class TerminalGuiRunner
     {
         if (_config.Trash.Count == 0)
         {
-            MessageBox.Query(RequireApp(), "Trash Bin", "Trash is empty.", "OK");
+            ShowInfoDialog("Trash Bin", "Trash is empty.");
             return;
         }
 
@@ -2237,17 +2325,11 @@ internal sealed class TerminalGuiRunner
             TabStop = TabBehavior.TabGroup
         };
 
-        var textView = new TextView
-        {
-            X = 0,
-            Y = 0,
-            Width = Dim.Fill(),
-            Height = Dim.Fill(1),
-            ReadOnly = true,
-            WordWrap = false,
-            Text = details,
-            TabStop = TabBehavior.TabStop
-        };
+        var textView = CreateSelectableReadOnlyTextView(details);
+        textView.X = 0;
+        textView.Y = 0;
+        textView.Width = Dim.Fill();
+        textView.Height = Dim.Fill(1);
         dialog.Add(textView);
         dialog.Buttons = [recoverButton, versionHistoryButton, closeButton];
 
@@ -2276,6 +2358,7 @@ internal sealed class TerminalGuiRunner
             dialog.RequestStop();
         };
 
+        ConfigureEscapeToClose(dialog, dialog.RequestStop);
         textView.SetFocus();
         RequireApp().Run(dialog);
         dialog.Dispose();
@@ -2285,7 +2368,7 @@ internal sealed class TerminalGuiRunner
     {
         if (versionHistory.Count == 0)
         {
-            MessageBox.Query(RequireApp(), title, "No version history is available for this entry.", "OK");
+            ShowInfoDialog(title, "No version history is available for this entry.");
             return;
         }
 
@@ -2394,6 +2477,11 @@ internal sealed class TerminalGuiRunner
             value = null;
             dialog.RequestStop();
         };
+        ConfigureEscapeToClose(dialog, () =>
+        {
+            value = null;
+            dialog.RequestStop();
+        });
 
         field.SetFocus();
         RequireApp().Run(dialog);
@@ -2475,11 +2563,11 @@ internal sealed class TerminalGuiRunner
             : result.Message + Environment.NewLine + Environment.NewLine + string.Join(Environment.NewLine, result.Details);
         if (result.Succeeded)
         {
-            MessageBox.Query(RequireApp(), "SQL Manager", message, "OK");
+            ShowInfoDialog("SQL Manager", message);
         }
         else
         {
-            MessageBox.ErrorQuery(RequireApp(), "SQL Manager", message, "OK");
+            ShowErrorDialog("SQL Manager", message);
         }
     }
 
@@ -2498,18 +2586,18 @@ internal sealed class TerminalGuiRunner
         }
         catch (UserInputException exception)
         {
-            MessageBox.ErrorQuery(RequireApp(), title, exception.Message, "OK");
+            ShowErrorDialog(title, exception.Message);
         }
         catch (OperationCanceledException)
         {
             _exitCode = 130;
-            MessageBox.ErrorQuery(RequireApp(), title, "Operation cancelled.", "OK");
+            ShowErrorDialog(title, "Operation cancelled.");
             RequireApp().RequestStop();
         }
         catch (Exception exception)
         {
             ErrorLogger.LogException($"{title} UI action failed", exception);
-            MessageBox.ErrorQuery(RequireApp(), title, $"Unexpected error: {exception.Message}", "OK");
+            ShowErrorDialog(title, $"Unexpected error: {exception.Message}");
         }
     }
 
@@ -2593,7 +2681,7 @@ internal sealed class TerminalGuiRunner
         var server = GetActiveServerConfig();
         if (server is null)
         {
-            MessageBox.ErrorQuery(RequireApp(), "SQL Manager", "Select an active server first.", "OK");
+            ShowErrorDialog("SQL Manager", "Select an active server first.");
         }
 
         return server;
@@ -2620,8 +2708,7 @@ internal sealed class TerminalGuiRunner
     }
 
     private bool ConfirmExitApplication()
-        => MessageBox.Query(
-            RequireApp(),
+        => ShowChoiceDialog(
             "Exit SQL Manager",
             "Are you sure you want to exit?",
             "Stay",
@@ -2747,11 +2834,7 @@ internal sealed class TerminalGuiRunner
                 var generatedPassword = _passwordGenerator.Generate();
                 field.Text = generatedPassword;
                 field.SetFocus();
-                MessageBox.Query(
-                    RequireApp(),
-                    title,
-                    $"Generated password:{Environment.NewLine}{Environment.NewLine}{generatedPassword}",
-                    "OK");
+                ShowTextDialog(title, $"Generated password:{Environment.NewLine}{Environment.NewLine}{generatedPassword}");
             });
         };
 
