@@ -183,6 +183,27 @@ public sealed class UiFormattingTests
         Assert.Equal(24, size.Height);
     }
 
+    [Theory]
+    [InlineData(true, false, false, false)]
+    [InlineData(false, true, false, false)]
+    [InlineData(false, false, true, false)]
+    [InlineData(false, false, false, true)]
+    public void ShouldCancelMainWindowStop_OnlyCancelsUnexpectedStops(
+        bool isStarting,
+        bool exitApproved,
+        bool cancellationRequested,
+        bool expected)
+    {
+        var shouldCancel = InvokePrivateStatic<bool>(
+            typeof(TerminalGuiRunner),
+            "ShouldCancelMainWindowStop",
+            isStarting,
+            exitApproved,
+            cancellationRequested);
+
+        Assert.Equal(expected, shouldCancel);
+    }
+
     private static T InvokePrivateStatic<T>(Type type, string methodName, params object?[] arguments)
     {
         var method = type.GetMethod(methodName, BindingFlags.NonPublic | BindingFlags.Static);

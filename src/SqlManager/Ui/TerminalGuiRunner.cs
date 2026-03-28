@@ -27,6 +27,8 @@ internal sealed class TerminalGuiRunner
     private readonly List<IReadOnlyList<Button>> _mainMenuColumns = [];
     private readonly Dictionary<Button, (int ColumnIndex, int RowIndex)> _mainMenuButtonPositions = [];
     private bool _exitConfirmationApproved;
+    private bool _exitPromptOpen;
+    private bool _exitPromptQueued;
     private int _exitCode;
 
     public TerminalGuiRunner(SqlManagerService service)
@@ -39,25 +41,28 @@ internal sealed class TerminalGuiRunner
         _configPath = configPath;
         _cancellationToken = cancellationToken;
         _exitCode = 0;
+        _exitConfirmationApproved = false;
+        _exitPromptOpen = false;
+        _exitPromptQueued = false;
 
-        using IApplication app = Application.Create();
-        app.Init();
-        _app = app;
-
-        using var registration = cancellationToken.Register(() =>
-        {
-            try
-            {
-                app.Invoke(() => app.RequestStop());
-            }
-            catch
-            {
-                // Cancellation should not throw on the UI thread.
-            }
-        });
-
+        IApplication app = Application.Create();
         try
         {
+            app.Init();
+            _app = app;
+
+            using var registration = cancellationToken.Register(() =>
+            {
+                try
+                {
+                    app.Invoke(() => app.RequestStop());
+                }
+                catch
+                {
+                    // Cancellation should not throw on the UI thread.
+                }
+            });
+
             var summary = WaitForTaskCompletion(
                 _service.LoadConfigSummaryAsync(configPath, GetConfigEncryptionPassword(), cancellationToken),
                 "Loading Config",
@@ -86,6 +91,7 @@ internal sealed class TerminalGuiRunner
                 TabStop = TabBehavior.TabGroup
             };
             window.IsRunningChanging += OnMainWindowIsRunningChanging;
+            window.KeyDown += OnMainWindowKeyDown;
 
             BuildMainWindow(window);
             RefreshViews();
@@ -95,7 +101,10 @@ internal sealed class TerminalGuiRunner
         }
         finally
         {
+            _app = null;
+            app.Dispose();
             _configEncryptionPassword.Dispose();
+            TryClearTerminal();
         }
     }
 
@@ -242,6 +251,13 @@ internal sealed class TerminalGuiRunner
 
     private void HandleMainMenuKeyDown(Button button, Key key)
     {
+        if (key.NoCtrl.NoAlt.NoShift == Key.Esc)
+        {
+            key.Handled = true;
+            TryRequestApplicationExit();
+            return;
+        }
+
         if (!_mainMenuButtonPositions.TryGetValue(button, out var position))
         {
             return;
@@ -1601,6 +1617,17 @@ internal sealed class TerminalGuiRunner
         }
     }
 
+    private void OnMainWindowKeyDown(object? sender, Key key)
+    {
+        if (key.NoCtrl.NoAlt.NoShift != Key.Esc)
+        {
+            return;
+        }
+
+        key.Handled = true;
+        TryRequestApplicationExit();
+    }
+
     private void ShowTestUserLoginDialog()
     {
         var server = RequireActiveServer();
@@ -2769,13 +2796,27 @@ internal sealed class TerminalGuiRunner
 
     private void TryRequestApplicationExit()
     {
-        if (!ConfirmExitApplication())
+        _exitPromptQueued = false;
+        if (_exitPromptOpen)
         {
             return;
         }
 
-        _exitConfirmationApproved = true;
-        RequireApp().RequestStop();
+        _exitPromptOpen = true;
+        try
+        {
+            if (!ConfirmExitApplication())
+            {
+                return;
+            }
+
+            _exitConfirmationApproved = true;
+            RequireApp().RequestStop();
+        }
+        finally
+        {
+            _exitPromptOpen = false;
+        }
     }
 
     private bool ConfirmExitApplication()
@@ -2787,18 +2828,68 @@ internal sealed class TerminalGuiRunner
 
     private void OnMainWindowIsRunningChanging(object? sender, Terminal.Gui.App.CancelEventArgs<bool> args)
     {
-        if (args.NewValue)
+        if (!ShouldCancelMainWindowStop(args.NewValue, _exitConfirmationApproved, _cancellationToken.IsCancellationRequested))
+        {
+            if (_exitConfirmationApproved)
+            {
+                _exitConfirmationApproved = false;
+            }
+
+            return;
+        }
+
+        // Only explicit exit flows should stop the main window. Prompting from inside
+        // IsRunningChanging can leave Terminal.Gui stuck if the confirmation is cancelled.
+        args.Cancel = true;
+        QueueExitConfirmation();
+    }
+
+    private void QueueExitConfirmation()
+    {
+        if (_exitPromptQueued || _exitPromptOpen)
         {
             return;
         }
 
-        if (_exitConfirmationApproved)
+        _exitPromptQueued = true;
+        RequireApp().AddTimeout(TimeSpan.Zero, () =>
         {
-            _exitConfirmationApproved = false;
+            _exitPromptQueued = false;
+            if (!_exitConfirmationApproved && !_cancellationToken.IsCancellationRequested)
+            {
+                TryRequestApplicationExit();
+            }
+
+            return false;
+        });
+    }
+
+    private static bool ShouldCancelMainWindowStop(bool isStarting, bool exitApproved, bool cancellationRequested)
+        => !isStarting && !exitApproved && !cancellationRequested;
+
+    private static void TryClearTerminal()
+    {
+        if (Console.IsOutputRedirected)
+        {
             return;
         }
 
-        args.Cancel = !ConfirmExitApplication();
+        try
+        {
+            Console.Write("\u001b[2J\u001b[3J\u001b[H");
+            Console.Out.Flush();
+        }
+        catch
+        {
+            try
+            {
+                Console.Clear();
+            }
+            catch
+            {
+                // Best effort cleanup only.
+            }
+        }
     }
 
     private int RecordGameHighScore(string gameName, int score)
