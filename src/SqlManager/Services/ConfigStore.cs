@@ -477,7 +477,7 @@ internal sealed class ConfigStore
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
             $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
-            $"Trust Server Certificate: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
+            $"SQL Server TLS Mode: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
             $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
             $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
             $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",

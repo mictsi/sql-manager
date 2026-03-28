@@ -365,6 +365,66 @@ public sealed class ConfigEncryptionTests
     }
 
     [Fact]
+    public async Task ResolveServerContextAsync_PrefersServerIdentifierWhenMultipleConnectionsShareTheSameHost()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-resolve-server-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var store = new ConfigStore();
+            await store.SaveAsync(filePath, new SqlManagerConfig
+            {
+                SelectedServerName = "2",
+                Servers =
+                [
+                    new ServerConfig
+                    {
+                        ServerIdentifier = "1",
+                        DisplayName = "Shared SQL",
+                        ServerName = "shared.contoso.local",
+                        Provider = SqlProviders.SqlServer,
+                        AdminDatabase = "master",
+                        AdminUsername = "sa",
+                        AdminPassword = "SqlSecret123!"
+                    },
+                    new ServerConfig
+                    {
+                        ServerIdentifier = "2",
+                        DisplayName = "Shared PG",
+                        ServerName = "shared.contoso.local",
+                        Provider = SqlProviders.PostgreSql,
+                        AdminDatabase = "postgres",
+                        AdminUsername = "postgres",
+                        AdminPassword = "PgSecret123!"
+                    }
+                ]
+            }, CancellationToken.None);
+
+            var service = CreateService();
+            var context = await InvokeResolveServerContextAsync(service, new CommandOptions
+            {
+                Command = CommandKind.ShowDatabases,
+                ConfigPath = filePath,
+                ServerIdentifier = "2",
+                ServerName = "shared.contoso.local"
+            });
+
+            Assert.Equal("2", context.ServerIdentifier);
+            Assert.Equal(SqlProviders.PostgreSql, context.Provider);
+            Assert.Equal("postgres", context.AdminDatabase);
+            Assert.Equal("postgres", context.AdminUsername);
+            Assert.Equal("PgSecret123!", context.AdminPassword);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task AddServerAsync_AllowsSameHostWithDifferentConnectionIdentifiers()
     {
         var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-duplicate-host-{Guid.NewGuid():N}.json");
@@ -670,6 +730,15 @@ public sealed class ConfigEncryptionTests
 
     private static SqlManagerService CreateService()
         => new(new ConfigStore(), new ConfigPasswordProtector(), new PasswordGenerator(), new SqlServerGateway(), new PostgreSqlGateway());
+
+    private static async Task<ResolvedServerContext> InvokeResolveServerContextAsync(SqlManagerService service, CommandOptions options)
+    {
+        var method = typeof(SqlManagerService).GetMethod("ResolveServerContextAsync", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Assert.NotNull(method);
+
+        var task = (Task<ResolvedServerContext>)method!.Invoke(service, [options, true, CancellationToken.None, true])!;
+        return await task;
+    }
 
     private static SqlManagerConfig CreatePlaintextConfig()
         => new()

@@ -165,7 +165,7 @@ public sealed class UiFormattingTests
             "securejournal");
 
         Assert.Equal(
-            "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=securejournal;User ID=securejournal;Password=;Encrypt=True;TrustServerCertificate=False;",
+            "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=securejournal;User ID=securejournal;Password=;Encrypt=False;TrustServerCertificate=False;",
             preview);
     }
 

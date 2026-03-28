@@ -1301,6 +1301,11 @@ internal sealed class TerminalGuiRunner
 
     private void ShowServerEditorDialog(ServerConfig? existingServer)
     {
+        const int serverEditorFieldX = 41;
+        const int serverEditorFieldWidth = 55;
+        const int serverEditorValueWidth = 28;
+        const int serverEditorChooserX = 73;
+
         var isEdit = existingServer is not null;
         var selectedProvider = SqlProviders.Normalize(existingServer?.Provider);
         var identifierField = CreateTextField(existingServer is null
@@ -1381,22 +1386,47 @@ internal sealed class TerminalGuiRunner
         var dialog = new Dialog
         {
             Title = isEdit ? $"Edit Server: {ServerConnections.GetSelectionDisplay(existingServer!)}" : "Add Server",
-            Width = 88,
+            Width = 104,
             Height = 32,
             TabStop = TabBehavior.TabGroup
         };
         ApplyTheme(dialog, TerminalThemeSurface.Dialog);
 
+        identifierField.X = serverEditorFieldX;
+        identifierField.Width = serverEditorFieldWidth;
         identifierField.Y = 1;
         ConfigureSelectableReadOnlyField(identifierField);
+        displayNameField.X = serverEditorFieldX;
+        displayNameField.Width = serverEditorFieldWidth;
         displayNameField.Y = 3;
+        serverField.X = serverEditorFieldX;
+        serverField.Width = serverEditorFieldWidth;
         serverField.Y = 5;
+        providerValueLabel.X = serverEditorFieldX;
+        providerValueLabel.Width = serverEditorValueWidth;
+        changeProviderButton.X = serverEditorChooserX;
+        portField.X = serverEditorFieldX;
+        portField.Width = serverEditorFieldWidth;
         portField.Y = 9;
+        adminDatabaseField.X = serverEditorFieldX;
+        adminDatabaseField.Width = serverEditorFieldWidth;
         adminDatabaseField.Y = 11;
+        adminUserField.X = serverEditorFieldX;
+        adminUserField.Width = serverEditorFieldWidth;
         adminUserField.Y = 13;
+        adminPasswordField.X = serverEditorFieldX;
+        adminPasswordField.Width = serverEditorFieldWidth;
         adminPasswordField.Y = 15;
+        securityModeValueLabel.X = serverEditorFieldX;
+        securityModeValueLabel.Width = serverEditorValueWidth;
+        changeSecurityModeButton.X = serverEditorChooserX;
+        connectionTimeoutField.X = serverEditorFieldX;
+        connectionTimeoutField.Width = serverEditorFieldWidth;
         connectionTimeoutField.Y = 19;
+        commandTimeoutField.X = serverEditorFieldX;
+        commandTimeoutField.Width = serverEditorFieldWidth;
         commandTimeoutField.Y = 21;
+        poolingCheckBox.X = serverEditorFieldX;
         poolingCheckBox.Y = 23;
 
         dialog.Add(
@@ -1474,7 +1504,7 @@ internal sealed class TerminalGuiRunner
             adminUserLabel.Text = BuildServerEditorAdminUserLabel(selectedProvider);
             securityModeLabel.Text = selectedProvider == SqlProviders.PostgreSql
                 ? "SSL Mode:"
-                : "Encrypt / Trust:";
+                : "Encrypt / Trust Mode:";
             securityModeValueLabel.Text = selectedProvider == SqlProviders.PostgreSql
                 ? PostgreSqlSslModes.GetPickerDisplayName(selectedPostgreSqlSslMode)
                 : SqlServerTrustModes.GetPickerDisplayName(selectedSqlServerTrustMode);
@@ -1545,7 +1575,7 @@ internal sealed class TerminalGuiRunner
                     .Select(SqlServerTrustModes.GetPickerDisplayName)
                     .ToList();
                 var trustModeListView = CreateListView(items, Math.Max(0, SqlServerTrustModes.Choices.IndexOf(selectedSqlServerTrustMode)));
-                var selection = ShowListDialog("SQL Server Trust Mode", trustModeListView, "Select");
+                var selection = ShowListDialog("SQL Server Encrypt / Trust Mode", trustModeListView, "Select");
                 if (selection != 0)
                 {
                     return;
@@ -1773,7 +1803,7 @@ internal sealed class TerminalGuiRunner
                 AdminPassword = ResolveAdminPassword(server, adminPasswordField)
             }, _cancellationToken),
             "Show Databases",
-            "Loading databases from SQL Server. Press Ctrl+C to cancel.");
+            $"Loading databases from {SqlProviders.GetDisplayName(server.Provider)}. Press Ctrl+C to cancel.");
 
         if (result.ExitCode == 130)
         {
@@ -2165,7 +2195,7 @@ internal sealed class TerminalGuiRunner
         var supportsReadWriteRoles = SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer;
 
         var matrixViewportHeight = Math.Min(10, Math.Max(5, server.Databases.Count + 1));
-        var dialogHeight = Math.Min(18 + matrixViewportHeight, 30);
+        var dialogHeight = Math.Min((includePasswordField ? 19 : 18) + matrixViewportHeight, 30);
         var result = ShowServerDialog(
             title,
             server,
@@ -2190,7 +2220,7 @@ internal sealed class TerminalGuiRunner
                 if (includePasswordField && passwordField is not null)
                 {
                     AddPasswordFieldWithGenerateButton(dialog, currentY, "User Password (optional):", passwordField, title);
-                    currentY += 2;
+                    currentY += 3;
                 }
 
                 dialog.Add(new Label
@@ -3340,7 +3370,7 @@ internal sealed class TerminalGuiRunner
     internal static string BuildServerEditorProviderHint(string provider)
         => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
             ? "PostgreSQL: use the host name, connect through the postgres admin database, and choose SSL mode, timeouts, and pooling settings for the connection."
-            : "SQL Server: use a host or instance name, connect through the master admin database, and choose how Encrypt=True should handle TrustServerCertificate.";
+            : "SQL Server: use a host or instance name, connect through the master admin database, and choose whether the client uses Encrypt=False, Encrypt=True with TrustServerCertificate=True, or Encrypt=Strict.";
 
     private static string BuildPasswordState(string? password, bool encrypted)
     {
@@ -3396,11 +3426,12 @@ internal sealed class TerminalGuiRunner
     private void AddPasswordFieldWithGenerateButton(Dialog dialog, int y, string label, TextField field, string title)
     {
         const int buttonWidth = 14;
+        var fieldX = Math.Max(24, label.Length + 4);
 
         dialog.Add(new Label { X = 1, Y = y, Text = label });
-        field.X = 24;
+        field.X = fieldX;
         field.Y = y;
-        field.Width = Dim.Fill(buttonWidth + 4);
+        field.Width = Dim.Fill(buttonWidth + 5);
         dialog.Add(field);
 
         var generateButton = new Button

@@ -92,19 +92,24 @@ internal static class SqlServerTrustModes
     public static string GetDisplayName(string? value)
         => GetEffective(value) switch
         {
-            False => "False",
-            True => "True",
-            Strict => "Strict",
-            _ => "True"
+            False => "Encrypt=False, Trust=False",
+            True => "Encrypt=True, Trust=True",
+            Strict => "Encrypt=Strict, Trust=False",
+            _ => "Encrypt=True, Trust=True"
         };
 
     public static string GetPickerDisplayName(string? value)
         => GetEffective(value) == False
-            ? "False (Default)"
+            ? "False / False (Default)"
             : GetDisplayName(value);
 
     public static string GetEncryptKeywordValue(string? value)
-        => GetEffective(value) == Strict ? "Strict" : "True";
+        => GetEffective(value) switch
+        {
+            False => "False",
+            Strict => "Strict",
+            _ => "True"
+        };
 
     public static bool GetTrustServerCertificateValue(string? value)
         => GetEffective(value) == True;
@@ -122,7 +127,7 @@ internal static class SqlServerTrustModes
                 builder.TrustServerCertificate = true;
                 break;
             default:
-                builder.Encrypt = SqlConnectionEncryptOption.Mandatory;
+                builder.Encrypt = SqlConnectionEncryptOption.Optional;
                 builder.TrustServerCertificate = false;
                 break;
         }

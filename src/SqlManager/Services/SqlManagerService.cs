@@ -810,18 +810,23 @@ END
     private async Task<ResolvedServerContext> ResolveServerContextAsync(CommandOptions options, bool persistSelection, CancellationToken cancellationToken, bool requireAdminUsername = true)
     {
         var config = await LoadEditableConfigAsync(options.ConfigPath, options.EncryptionPassword, cancellationToken);
-        var serverName = options.ServerName;
-        if (string.IsNullOrWhiteSpace(serverName))
+        var requestedServer = !string.IsNullOrWhiteSpace(options.ServerIdentifier)
+            ? options.ServerIdentifier
+            : options.ServerName;
+        if (string.IsNullOrWhiteSpace(requestedServer))
         {
-            serverName = SelectConfiguredServerName(config);
+            requestedServer = SelectConfiguredServerName(config);
         }
 
-        if (string.IsNullOrWhiteSpace(serverName))
+        if (string.IsNullOrWhiteSpace(requestedServer))
         {
             throw new UserInputException("No server is configured. Run InitConfig or AddServer first, or pass ServerName explicitly.");
         }
 
-        var serverConfig = FindServer(config, serverName);
+        var serverConfig = FindServer(config, requestedServer);
+        var serverName = string.IsNullOrWhiteSpace(options.ServerName)
+            ? serverConfig?.ServerName ?? requestedServer
+            : options.ServerName;
         var serverIdentifier = serverConfig is null
             ? (string.IsNullOrWhiteSpace(options.ServerIdentifier)
                 ? ServerConnections.GetNextIdentifier(config.Servers)
@@ -1451,7 +1456,7 @@ END
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
             $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
-            $"Trust Server Certificate: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
+            $"SQL Server TLS Mode: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
             $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
             $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
             $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",

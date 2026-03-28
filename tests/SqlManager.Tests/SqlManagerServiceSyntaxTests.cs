@@ -22,6 +22,22 @@ public sealed class SqlManagerServiceSyntaxTests
     }
 
     [Fact]
+    public void BuildSqlServerUserConnectionString_UsesUnencryptedModeWhenFalseIsRequested()
+    {
+        var connectionString = ServerConnectionOptions.BuildSqlServerUserConnectionString(
+            "sql01.contoso.local",
+            1433,
+            "LabDb",
+            "app_user",
+            "Secret123!",
+            SqlServerTrustModes.False);
+
+        Assert.Equal(
+            "Server=tcp:sql01.contoso.local,1433;Initial Catalog=LabDb;User ID=app_user;Password=********;Encrypt=False;TrustServerCertificate=False;",
+            connectionString);
+    }
+
+    [Fact]
     public void BuildConnectionString_UsesPostgreSqlFormat()
     {
         var connectionString = InvokePrivateStatic<string>(
