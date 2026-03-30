@@ -1,134 +1,239 @@
 # SQL Manager
 
-SQL Server and PostgreSQL management utility with:
+`sql-manager` is a terminal-first SQL Server and PostgreSQL management tool built on .NET 10. It can run as a command-line utility or as a full-screen `Terminal.Gui` application.
 
-- a .NET 10 command-line cross-plattform utility
-- a built-in terminal UI for interactive management
+## Highlights
 
-## Security Information
+- Manage multiple SQL Server and PostgreSQL connections from one `sql-config.json`
+- Create and remove databases, create users, update passwords, show users and databases, and manage roles
+- Use the CLI for scripting or the TUI for interactive day-to-day administration
+- Configure provider-aware connection settings per server: port, admin database, SQL Server trust mode, PostgreSQL SSL mode, PostgreSQL pooling, and per-server timeouts
+- Protect the config at rest with Argon2id-derived encryption and AES-256-GCM, with migration support for older encrypted config formats
+- Track selected connection, theme preference, version history, and deleted config entries in a built-in trash bin
+- Build and publish self-contained single-file binaries for Windows, macOS, Linux, and musl targets
 
-We recommend that you enable encryption option for the configuration and set a password to protect the sensitive data that is stored in the configuration.
+## Security
 
+Treat `sql-config.json` as sensitive data.
 
-## Files
+When config encryption is disabled, stored admin and user passwords may be written in plaintext. When config encryption is enabled, the full config payload is encrypted at rest and stored connection strings remain masked.
 
-- `sql-config.json`: Stores multiple servers, provider settings, selected server, databases, users, roles, and connection strings.
-- `src/SqlManager`: .NET 10 implementation that can be published as single-file binaries for Windows, macOS, and Linux.
-- `build.ps1` and `test.ps1`: Optional local build and validation helpers.
+## Repository Layout
+
+- `src/SqlManager`: current .NET 10 application
+- `tests/SqlManager.Tests`: xUnit test project
+- `build.ps1`: local build and publish helper
+- `test.ps1`: restore and test helper
+- `sql-manager.ps1`: older PowerShell implementation retained in the repo; the primary app is the .NET project under `src/SqlManager`
 
 ## Requirements
 
+- .NET 10 SDK to build or run from source
+- PowerShell 7 to use `build.ps1` and `test.ps1`
 - Network access to the target SQL Server or PostgreSQL host
-- .NET SDK 10 to build locally
-- PowerShell 7 to run `build.ps1` or `test.ps1` locally
-- No .NET installation is required on the target machine when using the self-contained publish output
-- Choose the runtime identifier that matches the target OS and architecture, for example `win-x64`, `osx-arm64`, `linux-x64`, or `linux-musl-x64`
+- No .NET installation on the target machine when using self-contained publish output
 
-## Config Structure
+## Quick Start
+
+Run the TUI:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj --
+```
+
+Show help:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- help
+```
+
+Show version information:
+
+```powershell
+dotnet run --project .\src\SqlManager\SqlManager.csproj -- version
+```
+
+After publishing, the Windows binary is `sql-manager.exe`. On Linux and macOS self-contained publishes, the binary is `sql-manager`.
+
+## Config File
+
+The default config path is `sql-config.json` next to the executable.
+
+The app stores more metadata than older versions did. A typical config now looks like this:
 
 ```json
 {
-  "selectedServerName": "pg01.contoso.local",
-  "encryptPasswords": false,
-  "encryptionKey": "",
+  "selectedServerName": "1",
+  "themeName": "iTerm2 Tango Dark",
+  "encryptPasswords": true,
+  "encryptionKey": "<unlock-password-verifier>",
   "timeouts": {
     "connectionTimeoutSeconds": 15,
     "commandTimeoutSeconds": 30
   },
   "servers": [
     {
+      "serverIdentifier": "1",
+      "displayName": "Primary SQL Server",
       "serverName": "sql01.contoso.local",
       "provider": "sqlserver",
+      "port": 1433,
       "adminDatabase": "master",
       "adminUsername": "sa",
-      "adminPassword": "ServerAdminSecret123!",
-      "encrypted": false,
+      "adminPassword": "<encrypted-or-plain>",
+      "sqlServerTrustMode": "false",
+      "connectionTimeoutSeconds": 15,
+      "commandTimeoutSeconds": 30,
+      "encrypted": true,
       "databases": [
         {
           "databaseName": "LabDB",
           "users": [
             {
               "username": "LabDBUser",
-              "password": "stored-password",
-              "encrypted": false,
-              "roles": ["db_owner", "db_datareader"],
-              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=LabDBUser;Password=********;Encrypt=True;TrustServerCertificate=True;"
+              "password": "<encrypted-or-plain>",
+              "encrypted": true,
+              "roles": [
+                "db_owner",
+                "db_datareader"
+              ],
+              "connectionString": "Server=tcp:sql01.contoso.local,1433;Initial Catalog=LabDB;User ID=LabDBUser;Password=********;Encrypt=False;TrustServerCertificate=False;"
             }
           ]
         }
       ]
     },
     {
+      "serverIdentifier": "2",
+      "displayName": "Primary PostgreSQL",
       "serverName": "pg01.contoso.local",
       "provider": "postgresql",
       "port": 5432,
       "adminDatabase": "postgres",
       "adminUsername": "postgres",
-      "adminPassword": "PostgresAdminSecret123!",
-      "encrypted": false,
+      "adminPassword": "<encrypted-or-plain>",
+      "postgreSqlSslMode": "require",
+      "postgreSqlPooling": true,
+      "connectionTimeoutSeconds": 15,
+      "commandTimeoutSeconds": 30,
+      "encrypted": true,
       "databases": [
         {
           "databaseName": "appdb",
           "users": [
             {
-              "username": "app_reader",
-              "password": "stored-password",
-              "encrypted": false,
-              "roles": ["db_datareader"],
-              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_reader;Password=********;Ssl Mode=Require;"
+              "username": "app_owner",
+              "password": "<encrypted-or-plain>",
+              "encrypted": true,
+              "roles": [
+                "db_owner"
+              ],
+              "connectionString": "Host=pg01.contoso.local;Database=appdb;Username=app_owner;Password=********;Ssl Mode=Require;Port=5432;Timeout=15;Command Timeout=30;Pooling=true;"
             }
           ]
         }
       ]
     }
-  ]
+  ],
+  "trash": []
 }
 ```
 
-Provider-aware config notes:
+Config notes:
 
-- `provider` supports `sqlserver` and `postgresql`.
-- `port` is optional. If omitted, the server provider default is used.
-- `adminDatabase` defaults to `master` for SQL Server and `postgres` for PostgreSQL.
-- `encryptPasswords` controls whether stored passwords are written encrypted at rest.
-- `encryptionKey` stores the password-verifier metadata used to validate the unlock password before decrypting secrets.
-- `encrypted` on server and user entries shows whether the persisted password value is encrypted.
-- The CLI keeps generic role names in config: `db_owner`, `db_datareader`, and `db_datawriter`.
-- SQL syntax is generated per provider at runtime. SQL Server uses native database roles. PostgreSQL uses provider-specific role and grant statements behind the same generic config roles.
+- `selectedServerName` stores the selected connection identifier, not just the host name
+- `serverIdentifier` is a generated connection id used by selection and TUI workflows
+- `displayName` is the human-readable label shown in the UI
+- Top-level `timeouts` provide defaults; per-server timeout values override them
+- New SQL Server connections default to port `1433`, admin database `master`, and trust mode `false`
+- New PostgreSQL connections default to port `5432`, admin database `postgres`, SSL mode `prefer`, and pooling `true`
+- `versionHistory` metadata is generated for servers, databases, users, and trash entries even though it is omitted from the example above for brevity
+- The TUI trash bin stores deleted server, database, and user config entries so they can be restored later
+- Generic roles in config are provider-aware at execution time: SQL Server supports `db_owner`, `db_datareader`, and `db_datawriter`; PostgreSQL supports `db_owner` only
 
-When password encryption is enabled from the Configuration menu or the dedicated CLI commands, the app derives the encryption key from the unlock password with Argon2id, encrypts stored admin and user passwords with AES-256-GCM, and keeps connection strings masked with `Password=********` at rest. Existing PBKDF2-based encrypted configs remain readable.
+## CLI Commands
+
+Current top-level commands:
+
+- `version`
+- `tui`
+- `view-config`
+- `init-config`
+- `add-server`
+- `select-server`
+- `sync-server`
+- `show-databases`
+- `create-database`
+- `remove-database`
+- `create-user`
+- `add-role`
+- `remove-role`
+- `show-users`
+- `test-user-login`
+- `remove-user`
+- `update-password`
+- `enable-config-encryption`
+- `disable-config-encryption`
+- `migrate-config-encryption-format`
+- `help`
+
+Compatibility notes:
+
+- `sql-manager --version` is supported in addition to `sql-manager version`
+- PowerShell-style compatibility is still supported, for example `--action CreateUser`
+- Many server-scoped commands can reuse the selected connection and stored admin credentials from config when those options are omitted
 
 ## Examples
 
-### .NET CLI and TUI
-
-The examples below use the Windows app host generated by a local build:
+Add a SQL Server connection:
 
 ```powershell
-.\sql-manager.exe
+.\sql-manager.exe add-server --display-name "Primary SQL" --server-name sql01.contoso.local --provider sqlserver --port 1433 --admin-database master --admin-username sa --admin-password "Secret123!" --trust-mode false
 ```
 
-Run the interactive terminal UI:
+Add a PostgreSQL connection:
 
 ```powershell
-.\sql-manager.exe
+.\sql-manager.exe add-server --display-name "Primary Postgres" --server-name pg01.contoso.local --provider postgresql --port 5432 --admin-database postgres --admin-username postgres --admin-password "Secret123!" --ssl-mode require --pooling true
 ```
 
-The TUI is implemented with `Terminal.Gui`. It keeps an active server selection, server-scoped actions use that selected server, and each dialog exposes button-based `Run`, `Back`, and `Cancel` actions.
-
-The main TUI home screen is organized into three columns:
-
-- `Server Management`
-- `User Management`
-- `Configuration`
-
-Show help:
+Select the active connection by identifier:
 
 ```powershell
-.\sql-manager.exe help
+.\sql-manager.exe select-server --server-identifier 2
 ```
 
-Enable config encryption from the CLI:
+Sync the selected server into config:
+
+```powershell
+.\sql-manager.exe sync-server --admin-password "Secret123!"
+```
+
+Create a database:
+
+```powershell
+.\sql-manager.exe create-database --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB
+```
+
+Create a SQL Server user with generated password and two roles:
+
+```powershell
+.\sql-manager.exe create-user --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles db_owner,db_datareader
+```
+
+Remove a role from a user:
+
+```powershell
+.\sql-manager.exe remove-role --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles db_datareader
+```
+
+Test a stored or supplied user login:
+
+```powershell
+.\sql-manager.exe test-user-login --server-name pg01.contoso.local --database-name appdb --user-name app_owner --user-password "Secret123!"
+```
+
+Enable config encryption:
 
 ```powershell
 .\sql-manager.exe enable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
@@ -140,152 +245,99 @@ Migrate an older encrypted config to the current full-file encrypted format:
 .\sql-manager.exe migrate-config-encryption-format --config-path .\sql-config.json --encryption-password "ComplexPass!123"
 ```
 
-Disable config encryption from the CLI:
+Disable config encryption:
 
 ```powershell
 .\sql-manager.exe disable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
 ```
 
-Create a database with the .NET CLI:
+## TUI Overview
 
-```powershell
-.\sql-manager.exe create-database --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB
-```
+Running `sql-manager` with no arguments opens the full-screen terminal UI.
 
-Show live databases on the selected server:
+Current TUI areas include:
 
-```powershell
-.\sql-manager.exe show-databases --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!"
-```
+- Server management: select active server, add or edit a connection, sync configuration, and show or manage databases
+- User management: create users, manage roles, show users, test user logins, remove users, and update passwords
+- Configuration menu: save, view config, initialize config, change theme, toggle password encryption, inspect the trash bin, and refresh from disk
+- Help and About views: version details, command reference, repository URL, and general navigation help
+- Built-in games: Snake, Pong, and Tetris
 
-Remove a database:
+## Build and Test
 
-```powershell
-.\sql-manager.exe remove-database --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB
-```
-
-Create a user with generated password and roles:
-
-```powershell
-.\sql-manager.exe create-user --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles db_owner,db_datareader
-```
-
-Add a PostgreSQL server to the config:
-
-```powershell
-.\sql-manager.exe add-server --server-name pg01.contoso.local --provider postgresql --port 5432 --admin-database postgres --admin-username postgres --admin-password "Secret123!"
-```
-
-Create a PostgreSQL database:
-
-```powershell
-.\sql-manager.exe create-database --server-name pg01.contoso.local --admin-username postgres --admin-password "Secret123!" --database-name appdb
-```
-
-Create a PostgreSQL user with the same generic role syntax:
-
-```powershell
-.\sql-manager.exe create-user --server-name pg01.contoso.local --admin-username postgres --admin-password "Secret123!" --database-name appdb --user-name app_reader --roles db_datareader
-```
-
-Legacy action-style compatibility is also supported:
-
-```powershell
-.\sql-manager.exe --action CreateUser --server-name sql01.contoso.local --admin-username sa --admin-password "Secret123!" --database-name LabDB --user-name LabDBUser --roles dbowner
-```
-
-The .NET app is provider-aware for both SQL Server and PostgreSQL.
-
-Publish a single-file self-contained binary for one runtime:
-
-```powershell
-dotnet publish .\src\SqlManager\SqlManager.csproj -c Release -r win-x64 --self-contained true
-```
-
-Examples for other targets:
-
-```powershell
-dotnet publish .\src\SqlManager\SqlManager.csproj -c Release -r osx-arm64 --self-contained true
-dotnet publish .\src\SqlManager\SqlManager.csproj -c Release -r linux-x64 --self-contained true
-```
-
-Use the build script to publish one or more production runtimes into separate artifact folders:
-
-```powershell
-.\build.ps1 -Target Prod -Runtime win-x64,osx-arm64,linux-x64
-```
-
-Use `All` to publish the full runtime matrix currently supported by the script:
-
-```powershell
-.\build.ps1 -Target Prod -Runtime All
-```
-
-Use a specific CI or release build number without updating `build-number.txt`:
-
-```powershell
-.\build.ps1 -Target Prod -Runtime win-x64,linux-x64 -BuildNumber 42
-```
-
-Use an explicit full version, for example to match a release tag exactly:
-
-```powershell
-.\build.ps1 -Target Prod -Runtime win-x64,linux-x64 -VersionOverride 1.0.0
-```
-
-Use a separate informational version when you want the app to display build metadata such as a commit hash while keeping the numeric assembly version stable:
-
-```powershell
-.\build.ps1 -Target Prod -Runtime win-x64,linux-x64 -VersionOverride 1.0.0 -InformationalVersionOverride 1.0.0+abc1234
-```
-
-Published outputs are written to runtime-specific folders under:
-
-```text
-artifacts\prod\<runtime>
-```
-
-### GitHub Releases
-
-The repository can publish release binaries automatically from a Git tag using the GitHub Actions workflow in `.github/workflows/release.yml`.
-
-The workflow:
-
-- restores and validates the solution with `test.ps1`
-- publishes self-contained single-file binaries for the supported runtime matrix
-- packages each runtime output as a `.zip` asset
-- creates or updates a GitHub release for the tag and uploads the packaged binaries
-
-The workflow uses the tag name as the numeric release version and appends the short git commit hash to the app's informational version. A tag like `1.0.0` built from commit `abcdef1...` produces an app version of `1.0.0+abcdef1`.
-
-Tags must still be numeric versions like:
-
-```text
-1.0.0
-1.0.0.1
-```
-
-If a tag is not a numeric version, the release workflow fails.
-
-Run validation locally with:
+Run validation locally:
 
 ```powershell
 .\test.ps1 -Configuration Release
 ```
 
+Build debug output:
+
+```powershell
+.\build.ps1 -Target Debug
+```
+
+Build release output:
+
+```powershell
+.\build.ps1 -Target Release
+```
+
+Publish self-contained production output for selected runtimes:
+
+```powershell
+.\build.ps1 -Target Prod -Runtime win-x64,linux-x64
+```
+
+Publish the full runtime matrix:
+
+```powershell
+.\build.ps1 -Target Prod -Runtime All
+```
+
+Current publish targets supported by `build.ps1`:
+
+- `win-x64`
+- `win-arm64`
+- `osx-x64`
+- `osx-arm64`
+- `linux-x64`
+- `linux-arm64`
+- `linux-musl-x64`
+- `linux-musl-arm64`
+
+Build outputs are written under:
+
+```text
+artifacts\debug
+artifacts\release
+artifacts\prod\<runtime>
+```
+
+Versioning notes:
+
+- `build.ps1` increments `build-number.txt` when `-VersionOverride` is not supplied
+- `-BuildNumber` and `-VersionOverride` are mutually exclusive
+- `-InformationalVersionOverride` lets you keep a stable numeric version while appending metadata such as a commit hash
+
+## GitHub Releases
+
+The repository includes `.github/workflows/release.yml` to publish release assets from Git tags.
+
+The workflow:
+
+- runs on every pushed tag
+- requires the tag to be a numeric version like `1.0.0` or `1.0.0.1`
+- runs `.\test.ps1 -Configuration Release`
+- publishes self-contained binaries for the full runtime matrix
+- zips each runtime folder into a release asset
+- creates or updates the GitHub release and uploads the generated archives
+
+Release builds use the tag as the numeric version and append the short commit SHA to the informational version. For example, tag `1.0.0` built from commit `abcdef1...` becomes informational version `1.0.0+abcdef1`.
+
 ## Notes
 
-- Multiple servers are supported in `sql-config.json`. When `ServerName` is omitted, the utility uses the selected server or prompts you to choose one from the config.
-- The .NET utility defaults to TUI mode when started without arguments and falls back to subcommands when arguments are supplied.
-- The TUI exposes an explicit main-menu exit action and a `Select active server` flow that lists configured servers together with their admin usernames and whether an admin password is already saved.
-- `View Config` is the place to inspect the config summary, configured servers, tracked databases, and tracked users.
-- The root `timeouts` section in `sql-config.json` controls SQL connection timeout and SQL command timeout for the .NET utility.
-- The .NET utility wraps command execution, SQL access, JSON loading, and TUI actions in guarded error handling so user-facing failures return clean messages instead of unhandled crashes.
-- `SyncServer` replaces the selected server's database list in the config with the current live state from SQL Server and preserves any passwords already stored for matching users.
-- If `SyncServer` does not know a user's password, it still generates a connection string template with `Password=<PASSWORD_REQUIRED>` so the connection details are complete apart from the secret.
-- `AddServer` can store the server admin password in `sql-config.json`, and later CLI or TUI operations reuse the saved admin username and password when those options are omitted.
-- `ShowDatabases`, `CreateDatabase`, `RemoveDatabase`, `CreateUser`, `AddRole`, `ShowUsers`, `RemoveUser`, and `UpdatePassword` can read `ServerName`, `AdminUsername`, and the saved admin password from `sql-config.json`.
-- Accepted role names are `dbowner` or `db_owner`, `dbreader` or `db_reader` or `db_datareader`, and `dbwriter` or `db_writer` or `db_datawriter`.
-- Generated passwords are 20 characters long and include uppercase, lowercase, numeric, and special characters.
-- If a login already exists and the utility does not know its password, pass `-NewUserPassword` so the utility can update the login and create a correct connection string.
-- Treat `sql-config.json` as sensitive. When config encryption is disabled, stored admin and user passwords may be written in plaintext.
+- The app defaults to TUI mode when started without arguments and switches to CLI mode when arguments are supplied
+- SQL Server role aliases accepted by the CLI include `dbowner`, `db_owner`, `dbreader`, `db_reader`, `db_datareader`, `dbwriter`, `db_writer`, and `db_datawriter`
+- PostgreSQL currently supports `db_owner` only; reader and writer role aliases are rejected for PostgreSQL targets
+- Existing encrypted configs from older versions remain readable and can be migrated to the full-file encrypted format
