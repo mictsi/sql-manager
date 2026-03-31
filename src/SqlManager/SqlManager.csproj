@@ -21,7 +21,7 @@
     <FileVersion Condition="'$(FileVersion)' == '' and $([System.Text.RegularExpressions.Regex]::IsMatch('$(Version)', '^\d+\.\d+\.\d+\.\d+$'))">$(Version)</FileVersion>
     <InformationalVersion Condition="'$(InformationalVersion)' == ''">$(Version)</InformationalVersion>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <Description>Manage SQL Server and PostgreSQL servers, databases, users, and configuration from a terminal UI or CLI.</Description>
+    <Description>Manage SQL Server, PostgreSQL, and MySQL/MariaDB servers, databases, users, and configuration from a terminal UI or CLI.</Description>
     <RepositoryUrl>https://github.com/mictsi/sql-manager</RepositoryUrl>
     <Copyright>Copyright @mictsi</Copyright>
   </PropertyGroup>
@@ -40,6 +40,7 @@
   <ItemGroup>
     <PackageReference Include="Konscious.Security.Cryptography.Argon2" Version="1.3.1" />
     <PackageReference Include="Microsoft.Data.SqlClient" Version="6.0.2" />
+    <PackageReference Include="MySqlConnector" Version="2.4.0" />
     <PackageReference Include="Npgsql" Version="9.0.3" />
     <PackageReference Include="Spectre.Console" Version="0.49.1" />
     <PackageReference Include="Terminal.Gui" Version="2.0.0-beta.10" />

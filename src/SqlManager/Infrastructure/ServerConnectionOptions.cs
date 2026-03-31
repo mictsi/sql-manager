@@ -1,4 +1,5 @@
 using Microsoft.Data.SqlClient;
+using MySqlConnector;
 using Npgsql;
 
 namespace SqlManager;
@@ -134,10 +135,75 @@ internal static class SqlServerTrustModes
     }
 }
 
+internal static class MySqlSslModes
+{
+    public const string Disabled = "disabled";
+    public const string Preferred = "preferred";
+    public const string Required = "required";
+    public const string VerifyCa = "verifyca";
+    public const string VerifyFull = "verifyfull";
+
+    public static IReadOnlyList<string> Choices { get; } = [Required, VerifyFull, Preferred, Disabled, VerifyCa];
+
+    public static string GetDefaultForNewServers() => Required;
+
+    public static string NormalizeConfigured(string? value)
+        => string.IsNullOrWhiteSpace(value) ? string.Empty : Normalize(value);
+
+    public static string GetEffective(string? value)
+        => string.IsNullOrWhiteSpace(value) ? Required : Normalize(value);
+
+    public static string Normalize(string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? throw new UserInputException("MySQL SSL mode is required.")
+            : value.Trim().ToLowerInvariant() switch
+            {
+                "disabled" or "disable" or "none" => Disabled,
+                "preferred" or "prefer" => Preferred,
+                "required" or "require" => Required,
+                "verifyca" or "verify-ca" => VerifyCa,
+                "verifyfull" or "verify-full" => VerifyFull,
+                _ => throw new UserInputException($"Unsupported MySQL SSL mode '{value}'.")
+            };
+
+    public static string GetDisplayName(string? value)
+        => GetEffective(value) switch
+        {
+            Disabled => "Disabled",
+            Preferred => "Preferred",
+            Required => "Required",
+            VerifyCa => "VerifyCA",
+            VerifyFull => "VerifyFull",
+            _ => "Required"
+        };
+
+    public static string GetPickerDisplayName(string? value)
+        => GetEffective(value) == Required
+            ? "Required (Default)"
+            : GetDisplayName(value);
+
+    public static MySqlSslMode ToMySqlSslMode(string? value)
+        => GetEffective(value) switch
+        {
+            Disabled => MySqlSslMode.None,
+            Preferred => MySqlSslMode.Preferred,
+            Required => MySqlSslMode.Required,
+            VerifyCa => MySqlSslMode.VerifyCA,
+            VerifyFull => MySqlSslMode.VerifyFull,
+            _ => MySqlSslMode.Required
+        };
+}
+
 internal static class ServerConnectionOptions
 {
     public static bool GetEffectivePostgreSqlPooling(bool? pooling)
         => pooling ?? true;
+
+    public static bool GetEffectiveMySqlPooling(bool? pooling)
+        => pooling ?? true;
+
+    public static bool GetEffectiveMySqlAllowPublicKeyRetrieval(bool? allowPublicKeyRetrieval)
+        => allowPublicKeyRetrieval ?? false;
 
     public static int GetEffectiveConnectionTimeoutSeconds(int? configuredValue, int fallbackValue = SqlTimeoutConfig.DefaultConnectionTimeoutSeconds)
         => configuredValue is > 0 ? configuredValue.Value : fallbackValue;
@@ -185,5 +251,22 @@ internal static class ServerConnectionOptions
         var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
         var effectivePort = port is > 0 ? port.Value : SqlProviders.GetDefaultPort(SqlProviders.PostgreSql);
         return $"Host={server};Database={database};Username={username};Password={resolvedPassword};Ssl Mode={PostgreSqlSslModes.GetDisplayName(sslMode)};Port={effectivePort};Timeout={GetEffectiveConnectionTimeoutSeconds(connectionTimeoutSeconds)};Command Timeout={GetEffectiveCommandTimeoutSeconds(commandTimeoutSeconds)};Pooling={GetEffectivePostgreSqlPooling(pooling).ToString().ToLowerInvariant()};";
+    }
+
+    public static string BuildMySqlUserConnectionString(
+        string server,
+        int? port,
+        string database,
+        string username,
+        string? password,
+        string? sslMode,
+        bool? pooling,
+        bool? allowPublicKeyRetrieval,
+        int? connectionTimeoutSeconds,
+        int? commandTimeoutSeconds)
+    {
+        var resolvedPassword = string.IsNullOrWhiteSpace(password) ? "<PASSWORD_REQUIRED>" : "********";
+        var effectivePort = port is > 0 ? port.Value : SqlProviders.GetDefaultPort(SqlProviders.MySql);
+        return $"Server={server};Database={database};User ID={username};Password={resolvedPassword};Ssl Mode={MySqlSslModes.GetDisplayName(sslMode)};Port={effectivePort};Connection Timeout={GetEffectiveConnectionTimeoutSeconds(connectionTimeoutSeconds)};Default Command Timeout={GetEffectiveCommandTimeoutSeconds(commandTimeoutSeconds)};Pooling={GetEffectiveMySqlPooling(pooling).ToString().ToLowerInvariant()};Allow Public Key Retrieval={GetEffectiveMySqlAllowPublicKeyRetrieval(allowPublicKeyRetrieval).ToString().ToLowerInvariant()};";
     }
 }

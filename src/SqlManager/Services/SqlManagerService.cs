@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Security.Cryptography;
 using Microsoft.Data.SqlClient;
+using MySqlConnector;
 using Npgsql;
 
 namespace SqlManager;
@@ -10,6 +11,7 @@ internal sealed class SqlManagerService
 {
     private static readonly string[] SupportedSqlServerRoles = ["db_owner", "db_datareader", "db_datawriter"];
     private static readonly string[] SupportedPostgreSqlRoles = ["db_owner"];
+    private static readonly string[] SupportedMySqlRoles = ["db_owner"];
     private const string TrashEntryTypeServer = "server";
     private const string TrashEntryTypeDatabase = "database";
     private const string TrashEntryTypeUser = "user";
@@ -18,14 +20,16 @@ internal sealed class SqlManagerService
     private readonly PasswordGenerator _passwordGenerator;
     private readonly SqlServerGateway _sqlServerGateway;
     private readonly PostgreSqlGateway _postgreSqlGateway;
+    private readonly MySqlGateway _mySqlGateway;
 
-    public SqlManagerService(ConfigStore configStore, ConfigPasswordProtector configPasswordProtector, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway, PostgreSqlGateway postgreSqlGateway)
+    public SqlManagerService(ConfigStore configStore, ConfigPasswordProtector configPasswordProtector, PasswordGenerator passwordGenerator, SqlServerGateway sqlServerGateway, PostgreSqlGateway postgreSqlGateway, MySqlGateway mySqlGateway)
     {
         _configStore = configStore;
         _configPasswordProtector = configPasswordProtector;
         _passwordGenerator = passwordGenerator;
         _sqlServerGateway = sqlServerGateway;
         _postgreSqlGateway = postgreSqlGateway;
+        _mySqlGateway = mySqlGateway;
     }
 
     public Task<OperationResult<SqlManagerConfig>> LoadConfigSummaryAsync(string configPath, CancellationToken cancellationToken)
@@ -184,7 +188,15 @@ internal sealed class SqlManagerService
                     options.Port,
                     options.AdminDatabase,
                     options.AdminUsername,
-                    options.AdminPassword);
+                    options.AdminPassword,
+                    options.PostgreSqlSslMode,
+                    options.PostgreSqlPooling,
+                    options.MySqlSslMode,
+                    options.MySqlPooling,
+                    options.MySqlAllowPublicKeyRetrieval,
+                    options.SqlServerTrustMode,
+                    options.ConnectionTimeoutSeconds,
+                    options.CommandTimeoutSeconds);
                 server.AdminUsername = options.AdminUsername ?? server.AdminUsername;
                 server.AdminPassword = options.AdminPassword ?? server.AdminPassword;
                 config.SelectedServerName = ServerConnections.GetIdentifier(server);
@@ -213,6 +225,9 @@ internal sealed class SqlManagerService
                 options.AdminPassword,
                 options.PostgreSqlSslMode,
                 options.PostgreSqlPooling,
+                options.MySqlSslMode,
+                options.MySqlPooling,
+                options.MySqlAllowPublicKeyRetrieval,
                 options.SqlServerTrustMode,
                 options.ConnectionTimeoutSeconds,
                 options.CommandTimeoutSeconds);
@@ -238,6 +253,9 @@ internal sealed class SqlManagerService
         string? adminPassword,
         string? postgreSqlSslMode,
         bool? postgreSqlPooling,
+        string? mySqlSslMode,
+        bool? mySqlPooling,
+        bool? mySqlAllowPublicKeyRetrieval,
         string? sqlServerTrustMode,
         int? connectionTimeoutSeconds,
         int? commandTimeoutSeconds,
@@ -272,6 +290,17 @@ internal sealed class SqlManagerService
                 : PostgreSqlSslModes.Normalize(postgreSqlSslMode);
             server.PostgreSqlPooling = normalizedProvider == SqlProviders.PostgreSql
                 ? postgreSqlPooling ?? true
+                : null;
+            server.MySqlSslMode = string.IsNullOrWhiteSpace(mySqlSslMode)
+                ? normalizedProvider == SqlProviders.MySql
+                    ? MySqlSslModes.GetDefaultForNewServers()
+                    : string.Empty
+                : MySqlSslModes.Normalize(mySqlSslMode);
+            server.MySqlPooling = normalizedProvider == SqlProviders.MySql
+                ? mySqlPooling ?? true
+                : null;
+            server.MySqlAllowPublicKeyRetrieval = normalizedProvider == SqlProviders.MySql
+                ? mySqlAllowPublicKeyRetrieval ?? false
                 : null;
             server.SqlServerTrustMode = string.IsNullOrWhiteSpace(sqlServerTrustMode)
                 ? normalizedProvider == SqlProviders.SqlServer
@@ -375,7 +404,7 @@ internal sealed class SqlManagerService
                 synchronizedDatabases.Add(databaseConfig);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             serverConfig.Databases = synchronizedDatabases;
             serverConfig.AdminUsername = context.AdminUsername;
             serverConfig.AdminPassword = context.AdminPassword;
@@ -416,7 +445,7 @@ END
 
                 await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
             }
-            else
+            else if (IsPostgreSql(context.Provider))
             {
                 var databaseExists = await ExecuteScalarIntAsync(
                     context,
@@ -435,8 +464,27 @@ END
                         cancellationToken);
                 }
             }
+            else
+            {
+                var databaseExists = await ExecuteScalarIntAsync(
+                    context,
+                    adminPassword,
+                    $"SELECT COUNT(1) FROM information_schema.schemata WHERE schema_name = {QuoteMySqlLiteral(databaseName)};",
+                    context.AdminDatabase,
+                    cancellationToken) > 0;
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+                if (!databaseExists)
+                {
+                    await ExecuteNonQueryAsync(
+                        context,
+                        adminPassword,
+                        $"CREATE DATABASE {QuoteMySqlIdentifier(databaseName)};",
+                        context.AdminDatabase,
+                        cancellationToken);
+                }
+            }
+
+            var serverConfig = GetOrCreateServer(context);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             AddVersion(databaseConfig.VersionHistory, "Database added to config.", BuildDatabaseVersionDetails(serverConfig, databaseConfig));
             context.Config.SelectedServerName = context.ServerIdentifier;
@@ -453,7 +501,9 @@ END
             var databaseName = Require(options.DatabaseName, "RemoveDatabase requires DatabaseName.");
             var databaseExistsQuery = IsSqlServer(context.Provider)
                 ? $"SELECT COUNT(1) FROM sys.databases WHERE name = {QuoteSqlLiteral(databaseName)};"
-                : $"SELECT COUNT(1) FROM pg_database WHERE datname = {QuotePostgreSqlLiteral(databaseName)};";
+                : IsPostgreSql(context.Provider)
+                    ? $"SELECT COUNT(1) FROM pg_database WHERE datname = {QuotePostgreSqlLiteral(databaseName)};"
+                    : $"SELECT COUNT(1) FROM information_schema.schemata WHERE schema_name = {QuoteMySqlLiteral(databaseName)};";
             var databaseExists = await ExecuteScalarIntAsync(
                 context,
                 adminPassword,
@@ -472,14 +522,20 @@ END
                 var query = $"ALTER DATABASE {quotedDatabase} SET SINGLE_USER WITH ROLLBACK IMMEDIATE; DROP DATABASE {quotedDatabase};";
                 await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
             }
-            else
+            else if (IsPostgreSql(context.Provider))
             {
                 var quotedDatabase = QuotePostgreSqlIdentifier(databaseName);
                 var query = $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = {QuotePostgreSqlLiteral(databaseName)} AND pid <> pg_backend_pid(); DROP DATABASE {quotedDatabase};";
                 await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
             }
+            else
+            {
+                var quotedDatabase = QuoteMySqlIdentifier(databaseName);
+                var query = $"DROP DATABASE {quotedDatabase};";
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             SoftDeleteDatabase(context.Config, serverConfig, databaseName, options.EncryptionPassword);
             context.Config.SelectedServerName = context.ServerIdentifier;
             await SaveEditableConfigAsync(options.ConfigPath, context.Config, options.EncryptionPassword, cancellationToken);
@@ -502,7 +558,9 @@ END
 
             var loginExistsQuery = IsSqlServer(context.Provider)
                 ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
-                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+                : IsPostgreSql(context.Provider)
+                    ? $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};"
+                    : $"SELECT COUNT(1) FROM mysql.user WHERE User = {QuoteMySqlLiteral(userName)} AND Host = '%';";
             var loginExists = await ExecuteScalarIntAsync(
                 context,
                 adminPassword,
@@ -513,9 +571,9 @@ END
             var resolvedPassword = ResolveRequestedPassword(options.NewUserPassword, loginExists, context.ServerConfig, userName);
             await EnsureServerLoginAsync(context, adminPassword, databaseName, userName, resolvedPassword.Password, loginExists, !string.IsNullOrWhiteSpace(options.NewUserPassword), cancellationToken);
             var membershipQuery = BuildRoleMembershipSyncQuery(context, databaseName, userName, roles, failIfUserMissing: false);
-            await ExecuteNonQueryAsync(context, adminPassword, membershipQuery, databaseName, cancellationToken);
+            await ExecuteNonQueryAsync(context, adminPassword, membershipQuery, GetAdministrativeExecutionDatabase(context, databaseName), cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Password = resolvedPassword.Password;
@@ -545,7 +603,9 @@ END
 
             var loginExistsQuery = IsSqlServer(context.Provider)
                 ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
-                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+                : IsPostgreSql(context.Provider)
+                    ? $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};"
+                    : $"SELECT COUNT(1) FROM mysql.user WHERE User = {QuoteMySqlLiteral(userName)} AND Host = '%';";
             var loginExists = await ExecuteScalarIntAsync(
                 context,
                 adminPassword,
@@ -553,7 +613,7 @@ END
                 context.AdminDatabase,
                 cancellationToken) > 0;
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             var knownPassword = GetStoredPasswordForUser(serverConfig, userName);
             var passwordForConfig = knownPassword;
             string passwordMessage;
@@ -596,13 +656,13 @@ END
                 if (assignment.Roles.Count == 0)
                 {
                     var dropUserQuery = BuildRemoveDatabaseUserQuery(context, assignment.DatabaseName, userName);
-                    await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, assignment.DatabaseName, cancellationToken);
+                    await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, GetAdministrativeExecutionDatabase(context, assignment.DatabaseName), cancellationToken);
                     SoftDeleteUsersFromConfigDatabases(context.Config, serverConfig, userName, [assignment.DatabaseName], options.EncryptionPassword);
                     continue;
                 }
 
                 var syncQuery = BuildRoleMembershipSyncQuery(context, assignment.DatabaseName, userName, assignment.Roles, failIfUserMissing: false);
-                await ExecuteNonQueryAsync(context, adminPassword, syncQuery, assignment.DatabaseName, cancellationToken);
+                await ExecuteNonQueryAsync(context, adminPassword, syncQuery, GetAdministrativeExecutionDatabase(context, assignment.DatabaseName), cancellationToken);
 
                 var databaseConfig = GetOrCreateDatabase(serverConfig, assignment.DatabaseName);
                 var userConfig = GetOrCreateUser(databaseConfig, userName);
@@ -639,9 +699,9 @@ END
             }
 
             var query = BuildAddRolesQuery(context, databaseName, userName, roles);
-            await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
+            await ExecuteNonQueryAsync(context, adminPassword, query, GetAdministrativeExecutionDatabase(context, databaseName), cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Concat(roles).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -667,9 +727,9 @@ END
             }
 
             var query = BuildRemoveRolesQuery(context, databaseName, userName, roles);
-            await ExecuteNonQueryAsync(context, adminPassword, query, databaseName, cancellationToken);
+            await ExecuteNonQueryAsync(context, adminPassword, query, GetAdministrativeExecutionDatabase(context, databaseName), cancellationToken);
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             var databaseConfig = GetOrCreateDatabase(serverConfig, databaseName);
             var userConfig = GetOrCreateUser(databaseConfig, userName);
             userConfig.Roles = userConfig.Roles.Except(roles, StringComparer.OrdinalIgnoreCase).ToList();
@@ -702,14 +762,11 @@ END
             var userName = Require(options.UserName, "TestUserLogin requires UserName.");
             var password = ResolveUserLoginPassword(options.NewUserPassword, context.ServerConfig, databaseName, userName);
             var testValue = await ExecuteScalarIntAsync(
-                context.Provider,
-                context.ServerName,
-                context.Port,
+                context,
                 userName,
                 password,
                 "SELECT 1;",
                 databaseName,
-                context.Timeouts,
                 cancellationToken);
 
             if (testValue != 1)
@@ -738,10 +795,10 @@ END
             foreach (var databaseName in selectedDatabases)
             {
                 var dropUserQuery = BuildRemoveDatabaseUserQuery(context, databaseName, userName);
-                await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, databaseName, cancellationToken);
+                await ExecuteNonQueryAsync(context, adminPassword, dropUserQuery, GetAdministrativeExecutionDatabase(context, databaseName), cancellationToken);
             }
 
-            var serverConfig = GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword);
+            var serverConfig = GetOrCreateServer(context);
             if (selectedDatabases.Count > 0)
             {
                 SoftDeleteUsersFromConfigDatabases(context.Config, serverConfig, userName, selectedDatabases, options.EncryptionPassword);
@@ -770,7 +827,9 @@ END
             var userName = Require(options.UserName, "UpdatePassword requires UserName.");
             var loginExistsQuery = IsSqlServer(context.Provider)
                 ? $"SELECT COUNT(1) FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)};"
-                : $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};";
+                : IsPostgreSql(context.Provider)
+                    ? $"SELECT COUNT(1) FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)};"
+                    : $"SELECT COUNT(1) FROM mysql.user WHERE User = {QuoteMySqlLiteral(userName)} AND Host = '%';";
             var loginExists = await ExecuteScalarIntAsync(
                 context,
                 adminPassword,
@@ -780,7 +839,7 @@ END
 
             if (loginExists == 0)
             {
-                var subject = IsSqlServer(context.Provider) ? "Login" : "Role";
+                var subject = IsPostgreSql(context.Provider) ? "Role" : "Login";
                 throw new UserInputException($"{subject} '{userName}' does not exist on '{context.ServerName}'.");
             }
 
@@ -789,12 +848,13 @@ END
                 : options.NewUserPassword!;
             await EnsureServerLoginAsync(context, adminPassword, context.AdminDatabase, userName, newPassword, true, true, cancellationToken);
 
-            UpdateUserPasswordInConfig(GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), userName, newPassword);
-            foreach (var database in GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword).Databases)
+            var serverConfig = GetOrCreateServer(context);
+            UpdateUserPasswordInConfig(serverConfig, userName, newPassword);
+            foreach (var database in serverConfig.Databases)
             {
                 foreach (var user in database.Users.Where(candidate => candidate.Username.Equals(userName, StringComparison.OrdinalIgnoreCase)))
                 {
-                    AddVersion(user.VersionHistory, "Password updated.", BuildUserVersionDetails(GetOrCreateServer(context.Config, context.ServerIdentifier, context.ServerName, context.ServerDisplayName, context.Provider, context.Port, context.AdminDatabase, context.AdminUsername, context.AdminPassword), database, user));
+                    AddVersion(user.VersionHistory, "Password updated.", BuildUserVersionDetails(serverConfig, database, user));
                 }
             }
             context.Config.SelectedServerName = context.ServerIdentifier;
@@ -858,6 +918,17 @@ END
         var postgreSqlPooling = options.PostgreSqlPooling
             ?? serverConfig?.PostgreSqlPooling
             ?? true;
+        var mySqlSslMode = !string.IsNullOrWhiteSpace(options.MySqlSslMode)
+            ? MySqlSslModes.Normalize(options.MySqlSslMode)
+            : serverConfig is null
+                ? MySqlSslModes.GetDefaultForNewServers()
+                : MySqlSslModes.GetEffective(serverConfig.MySqlSslMode);
+        var mySqlPooling = options.MySqlPooling
+            ?? serverConfig?.MySqlPooling
+            ?? true;
+        var mySqlAllowPublicKeyRetrieval = options.MySqlAllowPublicKeyRetrieval
+            ?? serverConfig?.MySqlAllowPublicKeyRetrieval
+            ?? false;
         var sqlServerTrustMode = !string.IsNullOrWhiteSpace(options.SqlServerTrustMode)
             ? SqlServerTrustModes.Normalize(options.SqlServerTrustMode)
             : serverConfig is null
@@ -910,6 +981,21 @@ END
                     serverConfig.PostgreSqlPooling = options.PostgreSqlPooling.Value;
                 }
 
+                if (!string.IsNullOrWhiteSpace(options.MySqlSslMode))
+                {
+                    serverConfig.MySqlSslMode = mySqlSslMode;
+                }
+
+                if (options.MySqlPooling.HasValue)
+                {
+                    serverConfig.MySqlPooling = options.MySqlPooling.Value;
+                }
+
+                if (options.MySqlAllowPublicKeyRetrieval.HasValue)
+                {
+                    serverConfig.MySqlAllowPublicKeyRetrieval = options.MySqlAllowPublicKeyRetrieval.Value;
+                }
+
                 if (!string.IsNullOrWhiteSpace(options.SqlServerTrustMode))
                 {
                     serverConfig.SqlServerTrustMode = sqlServerTrustMode;
@@ -943,6 +1029,9 @@ END
             resolvedTimeouts,
             postgreSqlSslMode,
             postgreSqlPooling,
+            mySqlSslMode,
+            mySqlPooling,
+            mySqlAllowPublicKeyRetrieval,
             sqlServerTrustMode);
     }
 
@@ -1075,6 +1164,9 @@ END
                 AdminPassword = server.AdminPassword,
                 PostgreSqlSslMode = server.PostgreSqlSslMode,
                 PostgreSqlPooling = server.PostgreSqlPooling,
+                MySqlSslMode = server.MySqlSslMode,
+                MySqlPooling = server.MySqlPooling,
+                MySqlAllowPublicKeyRetrieval = server.MySqlAllowPublicKeyRetrieval,
                 SqlServerTrustMode = server.SqlServerTrustMode,
                 ConnectionTimeoutSeconds = server.ConnectionTimeoutSeconds,
                 CommandTimeoutSeconds = server.CommandTimeoutSeconds,
@@ -1455,11 +1547,14 @@ END
             $"Port: {(server.Port?.ToString() ?? "<default>")}",
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
-            $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"PostgreSQL SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"MySQL SSL Mode: {MySqlSslModes.GetDisplayName(server.MySqlSslMode)}",
             $"SQL Server TLS Mode: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
             $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
             $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
-            $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
+            $"PostgreSQL Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
+            $"MySQL Pooling: {ServerConnectionOptions.GetEffectiveMySqlPooling(server.MySqlPooling)}",
+            $"MySQL Allow Public Key Retrieval: {ServerConnectionOptions.GetEffectiveMySqlAllowPublicKeyRetrieval(server.MySqlAllowPublicKeyRetrieval)}",
             $"Password State: {BuildPasswordState(server.AdminPassword, server.Encrypted)}",
             $"Tracked Databases: {server.Databases.Count}",
             $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"
@@ -1504,6 +1599,9 @@ END
         string? adminPassword,
         string? postgreSqlSslMode = null,
         bool? postgreSqlPooling = null,
+        string? mySqlSslMode = null,
+        bool? mySqlPooling = null,
+        bool? mySqlAllowPublicKeyRetrieval = null,
         string? sqlServerTrustMode = null,
         int? connectionTimeoutSeconds = null,
         int? commandTimeoutSeconds = null)
@@ -1540,6 +1638,17 @@ END
                     : string.Empty,
                 PostgreSqlPooling = normalizedProvider == SqlProviders.PostgreSql
                     ? postgreSqlPooling ?? true
+                    : null,
+                MySqlSslMode = normalizedProvider == SqlProviders.MySql
+                    ? string.IsNullOrWhiteSpace(mySqlSslMode)
+                        ? MySqlSslModes.GetDefaultForNewServers()
+                        : MySqlSslModes.Normalize(mySqlSslMode)
+                    : string.Empty,
+                MySqlPooling = normalizedProvider == SqlProviders.MySql
+                    ? mySqlPooling ?? true
+                    : null,
+                MySqlAllowPublicKeyRetrieval = normalizedProvider == SqlProviders.MySql
+                    ? mySqlAllowPublicKeyRetrieval ?? false
                     : null,
                 SqlServerTrustMode = normalizedProvider == SqlProviders.SqlServer
                     ? string.IsNullOrWhiteSpace(sqlServerTrustMode)
@@ -1582,6 +1691,33 @@ END
                 server.PostgreSqlPooling = true;
             }
 
+            if (!string.IsNullOrWhiteSpace(mySqlSslMode))
+            {
+                server.MySqlSslMode = MySqlSslModes.Normalize(mySqlSslMode);
+            }
+            else if (normalizedProvider == SqlProviders.MySql && string.IsNullOrWhiteSpace(server.MySqlSslMode))
+            {
+                server.MySqlSslMode = MySqlSslModes.GetDefaultForNewServers();
+            }
+
+            if (mySqlPooling.HasValue)
+            {
+                server.MySqlPooling = mySqlPooling.Value;
+            }
+            else if (normalizedProvider == SqlProviders.MySql && !server.MySqlPooling.HasValue)
+            {
+                server.MySqlPooling = true;
+            }
+
+            if (mySqlAllowPublicKeyRetrieval.HasValue)
+            {
+                server.MySqlAllowPublicKeyRetrieval = mySqlAllowPublicKeyRetrieval.Value;
+            }
+            else if (normalizedProvider == SqlProviders.MySql && !server.MySqlAllowPublicKeyRetrieval.HasValue)
+            {
+                server.MySqlAllowPublicKeyRetrieval = false;
+            }
+
             if (!string.IsNullOrWhiteSpace(sqlServerTrustMode))
             {
                 server.SqlServerTrustMode = SqlServerTrustModes.Normalize(sqlServerTrustMode);
@@ -1603,12 +1739,24 @@ END
 
             if (normalizedProvider == SqlProviders.PostgreSql)
             {
+                server.MySqlSslMode = string.Empty;
+                server.MySqlPooling = null;
+                server.MySqlAllowPublicKeyRetrieval = null;
+                server.SqlServerTrustMode = string.Empty;
+            }
+            else if (normalizedProvider == SqlProviders.MySql)
+            {
+                server.PostgreSqlSslMode = string.Empty;
+                server.PostgreSqlPooling = null;
                 server.SqlServerTrustMode = string.Empty;
             }
             else
             {
                 server.PostgreSqlSslMode = string.Empty;
                 server.PostgreSqlPooling = null;
+                server.MySqlSslMode = string.Empty;
+                server.MySqlPooling = null;
+                server.MySqlAllowPublicKeyRetrieval = null;
             }
         }
 
@@ -1624,6 +1772,26 @@ END
 
         return server;
     }
+
+    private static ServerConfig GetOrCreateServer(ResolvedServerContext context)
+        => GetOrCreateServer(
+            context.Config,
+            context.ServerIdentifier,
+            context.ServerName,
+            context.ServerDisplayName,
+            context.Provider,
+            context.Port,
+            context.AdminDatabase,
+            context.AdminUsername,
+            context.AdminPassword,
+            context.PostgreSqlSslMode,
+            context.PostgreSqlPooling,
+            context.MySqlSslMode,
+            context.MySqlPooling,
+            context.MySqlAllowPublicKeyRetrieval,
+            context.SqlServerTrustMode,
+            context.Timeouts.ConnectionTimeoutSeconds,
+            context.Timeouts.CommandTimeoutSeconds);
 
     private static DatabaseConfig GetOrCreateDatabase(ServerConfig server, string databaseName)
     {
@@ -1803,22 +1971,33 @@ END
             return;
         }
 
-        await _postgreSqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, context.PostgreSqlSslMode, context.PostgreSqlPooling, cancellationToken);
+        if (IsPostgreSql(context.Provider))
+        {
+            await _postgreSqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, context.PostgreSqlSslMode, context.PostgreSqlPooling, cancellationToken);
+            return;
+        }
+
+        await _mySqlGateway.ExecuteNonQueryAsync(context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, context.MySqlSslMode, context.MySqlPooling, context.MySqlAllowPublicKeyRetrieval, cancellationToken);
     }
 
     private async Task<int> ExecuteScalarIntAsync(ResolvedServerContext context, string adminPassword, string query, string database, CancellationToken cancellationToken)
     {
-        return await ExecuteScalarIntAsync(context.Provider, context.ServerName, context.Port, context.AdminUsername, adminPassword, query, database, context.Timeouts, cancellationToken);
+        return await ExecuteScalarIntAsync(context, context.AdminUsername, adminPassword, query, database, cancellationToken);
     }
 
-    private async Task<int> ExecuteScalarIntAsync(string provider, string serverName, int? port, string username, string password, string query, string database, SqlTimeoutConfig timeouts, CancellationToken cancellationToken)
+    private async Task<int> ExecuteScalarIntAsync(ResolvedServerContext context, string username, string password, string query, string database, CancellationToken cancellationToken)
     {
-        if (IsSqlServer(provider))
+        if (IsSqlServer(context.Provider))
         {
-            return await _sqlServerGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, SqlServerTrustModes.GetDefaultForNewServers(), cancellationToken);
+            return await _sqlServerGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, username, password, query, database, context.Timeouts, context.SqlServerTrustMode, cancellationToken);
         }
 
-        return await _postgreSqlGateway.ExecuteScalarIntAsync(serverName, port, username, password, query, database, timeouts, PostgreSqlSslModes.GetDefaultForNewServers(), true, cancellationToken);
+        if (IsPostgreSql(context.Provider))
+        {
+            return await _postgreSqlGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, username, password, query, database, context.Timeouts, context.PostgreSqlSslMode, context.PostgreSqlPooling, cancellationToken);
+        }
+
+        return await _mySqlGateway.ExecuteScalarIntAsync(context.ServerName, context.Port, username, password, query, database, context.Timeouts, context.MySqlSslMode, context.MySqlPooling, context.MySqlAllowPublicKeyRetrieval, cancellationToken);
     }
 
     private async Task<IReadOnlyList<string>> LoadServerDatabaseNamesAsync(ResolvedServerContext context, string adminPassword, CancellationToken cancellationToken)
@@ -1837,16 +2016,32 @@ END
                 cancellationToken);
         }
 
-        return await _postgreSqlGateway.QueryNamesAsync(
+        if (IsPostgreSql(context.Provider))
+        {
+            return await _postgreSqlGateway.QueryNamesAsync(
+                context.ServerName,
+                context.Port,
+                context.AdminUsername,
+                adminPassword,
+                "SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn = true AND datname NOT IN ('postgres') ORDER BY datname;",
+                context.AdminDatabase,
+                context.Timeouts,
+                context.PostgreSqlSslMode,
+                context.PostgreSqlPooling,
+                cancellationToken);
+        }
+
+        return await _mySqlGateway.QueryNamesAsync(
             context.ServerName,
             context.Port,
             context.AdminUsername,
             adminPassword,
-            "SELECT datname FROM pg_database WHERE datistemplate = false AND datallowconn = true AND datname NOT IN ('postgres') ORDER BY datname;",
+            "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema', 'mysql', 'performance_schema', 'sys') ORDER BY schema_name;",
             context.AdminDatabase,
             context.Timeouts,
-            context.PostgreSqlSslMode,
-            context.PostgreSqlPooling,
+            context.MySqlSslMode,
+            context.MySqlPooling,
+            context.MySqlAllowPublicKeyRetrieval,
             cancellationToken);
     }
 
@@ -1865,16 +2060,32 @@ END
                 cancellationToken);
         }
 
-        return await _postgreSqlGateway.QueryDatabaseUsersAsync(
+        if (IsPostgreSql(context.Provider))
+        {
+            return await _postgreSqlGateway.QueryDatabaseUsersAsync(
+                context.ServerName,
+                context.Port,
+                context.AdminUsername,
+                adminPassword,
+                databaseName,
+                BuildPostgreSqlShowUsersQuery(databaseName),
+                context.Timeouts,
+                context.PostgreSqlSslMode,
+                context.PostgreSqlPooling,
+                cancellationToken);
+        }
+
+        return await _mySqlGateway.QueryDatabaseUsersAsync(
             context.ServerName,
             context.Port,
             context.AdminUsername,
             adminPassword,
-            databaseName,
-            BuildPostgreSqlShowUsersQuery(databaseName),
+            context.AdminDatabase,
+            BuildMySqlShowUsersQuery(databaseName),
             context.Timeouts,
-            context.PostgreSqlSslMode,
-            context.PostgreSqlPooling,
+            context.MySqlSslMode,
+            context.MySqlPooling,
+            context.MySqlAllowPublicKeyRetrieval,
             cancellationToken);
     }
 
@@ -1898,14 +2109,31 @@ END
             return;
         }
 
+        if (IsPostgreSql(context.Provider))
+        {
+            if (!loginExists)
+            {
+                var query = $"CREATE ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
+            else if (updatePassword)
+            {
+                var query = $"ALTER ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+                await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
+            }
+
+            return;
+        }
+
+        var mySqlAccount = QuoteMySqlAccount(userName);
         if (!loginExists)
         {
-            var query = $"CREATE ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+            var query = $"CREATE USER {mySqlAccount} IDENTIFIED BY {QuoteMySqlLiteral(password)};";
             await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
         }
         else if (updatePassword)
         {
-            var query = $"ALTER ROLE {QuotePostgreSqlIdentifier(userName)} LOGIN PASSWORD {QuotePostgreSqlLiteral(password)};";
+            var query = $"ALTER USER {mySqlAccount} IDENTIFIED BY {QuoteMySqlLiteral(password)};";
             await ExecuteNonQueryAsync(context, adminPassword, query, context.AdminDatabase, cancellationToken);
         }
     }
@@ -1949,7 +2177,9 @@ END
     private static string BuildRoleMembershipSyncQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
         => IsSqlServer(context.Provider)
             ? BuildSqlServerRoleMembershipSyncQuery(userName, desiredRoles, failIfUserMissing)
-            : BuildPostgreSqlRoleMembershipSyncQuery(databaseName, userName, desiredRoles, failIfUserMissing);
+            : IsPostgreSql(context.Provider)
+                ? BuildPostgreSqlRoleMembershipSyncQuery(databaseName, userName, desiredRoles, failIfUserMissing)
+                : BuildMySqlRoleMembershipSyncQuery(databaseName, userName, desiredRoles);
 
     private static string BuildSqlServerRoleMembershipSyncQuery(string userName, IReadOnlyCollection<string> desiredRoles, bool failIfUserMissing)
     {
@@ -2008,6 +2238,11 @@ END
         return queryBuilder.ToString();
     }
 
+    private static string BuildMySqlRoleMembershipSyncQuery(string databaseName, string userName, IReadOnlyCollection<string> desiredRoles)
+        => desiredRoles.Intersect(SupportedMySqlRoles, StringComparer.OrdinalIgnoreCase).Any()
+            ? $"GRANT ALL PRIVILEGES ON {BuildMySqlDatabaseScope(databaseName)} TO {QuoteMySqlAccount(userName)};"
+            : $"REVOKE ALL PRIVILEGES ON {BuildMySqlDatabaseScope(databaseName)} FROM {QuoteMySqlAccount(userName)};";
+
     private static string BuildAddRolesQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> roles)
     {
         if (IsSqlServer(context.Provider))
@@ -2030,16 +2265,21 @@ END
             return queryBuilder.ToString();
         }
 
-        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
-        var query = new StringBuilder();
-        query.AppendLine(BuildEnsurePostgreSqlManagedRolesQuery(databaseName));
-        query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
-        foreach (var role in roles)
+        if (IsPostgreSql(context.Provider))
         {
-            query.AppendLine($"GRANT {QuotePostgreSqlIdentifier(roleMap[role])} TO {QuotePostgreSqlIdentifier(userName)};");
+            var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+            var query = new StringBuilder();
+            query.AppendLine(BuildEnsurePostgreSqlManagedRolesQuery(databaseName));
+            query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
+            foreach (var role in roles)
+            {
+                query.AppendLine($"GRANT {QuotePostgreSqlIdentifier(roleMap[role])} TO {QuotePostgreSqlIdentifier(userName)};");
+            }
+
+            return query.ToString();
         }
 
-        return query.ToString();
+        return $"GRANT ALL PRIVILEGES ON {BuildMySqlDatabaseScope(databaseName)} TO {QuoteMySqlAccount(userName)};";
     }
 
     private static string BuildRemoveRolesQuery(ResolvedServerContext context, string databaseName, string userName, IReadOnlyCollection<string> roles)
@@ -2064,15 +2304,20 @@ END
             return queryBuilder.ToString();
         }
 
-        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
-        var query = new StringBuilder();
-        query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
-        foreach (var role in roles)
+        if (IsPostgreSql(context.Provider))
         {
-            query.AppendLine($"REVOKE {QuotePostgreSqlIdentifier(roleMap[role])} FROM {QuotePostgreSqlIdentifier(userName)};");
+            var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+            var query = new StringBuilder();
+            query.AppendLine($"DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN RAISE EXCEPTION 'Database user does not exist.'; END IF; END $$;");
+            foreach (var role in roles)
+            {
+                query.AppendLine($"REVOKE {QuotePostgreSqlIdentifier(roleMap[role])} FROM {QuotePostgreSqlIdentifier(userName)};");
+            }
+
+            return query.ToString();
         }
 
-        return query.ToString();
+        return $"REVOKE ALL PRIVILEGES ON {BuildMySqlDatabaseScope(databaseName)} FROM {QuoteMySqlAccount(userName)};";
     }
 
     private static string BuildRemoveDatabaseUserQuery(ResolvedServerContext context, string databaseName, string userName)
@@ -2082,21 +2327,28 @@ END
             return $"IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = {QuoteSqlLiteral(userName)}) DROP USER {QuoteSqlServerIdentifier(userName)};";
         }
 
-        var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
-        var query = new StringBuilder();
-        query.AppendLine($"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN");
-        foreach (var managedRole in roleMap.Values)
+        if (IsPostgreSql(context.Provider))
         {
-            query.AppendLine($"    REVOKE {QuotePostgreSqlIdentifier(managedRole)} FROM {QuotePostgreSqlIdentifier(userName)};");
+            var roleMap = GetPostgreSqlManagedRoleMap(databaseName);
+            var query = new StringBuilder();
+            query.AppendLine($"DO $$ BEGIN IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = {QuotePostgreSqlLiteral(userName)}) THEN");
+            foreach (var managedRole in roleMap.Values)
+            {
+                query.AppendLine($"    REVOKE {QuotePostgreSqlIdentifier(managedRole)} FROM {QuotePostgreSqlIdentifier(userName)};");
+            }
+            query.AppendLine("END IF; END $$;");
+            return query.ToString();
         }
-        query.AppendLine("END IF; END $$;");
-        return query.ToString();
+
+        return $"REVOKE ALL PRIVILEGES ON {BuildMySqlDatabaseScope(databaseName)} FROM {QuoteMySqlAccount(userName)};";
     }
 
     private static string BuildDropLoginQuery(ResolvedServerContext context, string userName)
         => IsSqlServer(context.Provider)
             ? $"IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name = {QuoteSqlLiteral(userName)}) DROP LOGIN {QuoteSqlServerIdentifier(userName)};"
-            : $"DROP ROLE IF EXISTS {QuotePostgreSqlIdentifier(userName)};";
+            : IsPostgreSql(context.Provider)
+                ? $"DROP ROLE IF EXISTS {QuotePostgreSqlIdentifier(userName)};"
+                : $"DROP USER IF EXISTS {QuoteMySqlAccount(userName)};";
 
     private static string BuildPostgreSqlShowUsersQuery(string databaseName)
     {
@@ -2134,6 +2386,46 @@ ORDER BY member.rolname;
         {
             ["db_owner"] = BuildPostgreSqlManagedRoleName(databaseName, "owner")
         };
+
+    private static string BuildMySqlShowUsersQuery(string databaseName)
+        => $"""
+SELECT
+    derived.username,
+    derived.loginname,
+    derived.roles
+FROM (
+    SELECT
+        `User` AS username,
+        CONCAT(`User`, '@', `Host`) AS loginname,
+        CASE
+            WHEN Select_priv = 'Y'
+             AND Insert_priv = 'Y'
+             AND Update_priv = 'Y'
+             AND Delete_priv = 'Y'
+             AND Create_priv = 'Y'
+             AND Drop_priv = 'Y'
+             AND References_priv = 'Y'
+             AND Index_priv = 'Y'
+             AND Alter_priv = 'Y'
+             AND Create_tmp_table_priv = 'Y'
+             AND Lock_tables_priv = 'Y'
+             AND Create_view_priv = 'Y'
+             AND Show_view_priv = 'Y'
+             AND Create_routine_priv = 'Y'
+             AND Alter_routine_priv = 'Y'
+             AND Execute_priv = 'Y'
+             AND Event_priv = 'Y'
+             AND Trigger_priv = 'Y'
+            THEN 'db_owner'
+            ELSE ''
+        END AS roles
+    FROM mysql.db
+    WHERE Db = {QuoteMySqlLiteral(databaseName)}
+      AND `User` <> ''
+) AS derived
+WHERE derived.roles <> ''
+ORDER BY derived.username, derived.loginname;
+""";
 
     private static string BuildEnsurePostgreSqlManagedRolesQuery(string databaseName)
     {
@@ -2196,7 +2488,7 @@ ORDER BY member.rolname;
                 "dbreader" or "db_reader" or "db_datareader" when isSqlServer => "db_datareader",
                 "dbwriter" or "db_writer" or "db_datawriter" when isSqlServer => "db_datawriter",
                 _ when isSqlServer => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. Use dbowner/db_owner, dbreader/db_reader/db_datareader, or dbwriter/db_writer/db_datawriter."),
-                _ => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. PostgreSQL supports dbowner/db_owner only.")
+                _ => throw new UserInputException($"Unsupported role '{role}' for {SqlProviders.GetDisplayName(provider)}. PostgreSQL and MySQL/MariaDB support dbowner/db_owner only.")
             });
         }
 
@@ -2215,6 +2507,11 @@ ORDER BY member.rolname;
             ? "SELECT CAST(1 AS int);"
             : "SELECT 1;";
 
+    private static string GetAdministrativeExecutionDatabase(ResolvedServerContext context, string databaseName)
+        => SqlProviders.Normalize(context.Provider) == SqlProviders.MySql
+            ? context.AdminDatabase
+            : databaseName;
+
     private static string BuildConnectionString(ResolvedServerContext context, string database, string username, string? password)
     {
         if (IsSqlServer(context.Provider))
@@ -2228,14 +2525,29 @@ ORDER BY member.rolname;
                 context.SqlServerTrustMode);
         }
 
-        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+        if (IsPostgreSql(context.Provider))
+        {
+            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+                context.ServerName,
+                context.Port,
+                database,
+                username,
+                password,
+                context.PostgreSqlSslMode,
+                context.PostgreSqlPooling,
+                context.Timeouts.ConnectionTimeoutSeconds,
+                context.Timeouts.CommandTimeoutSeconds);
+        }
+
+        return ServerConnectionOptions.BuildMySqlUserConnectionString(
             context.ServerName,
             context.Port,
             database,
             username,
             password,
-            context.PostgreSqlSslMode,
-            context.PostgreSqlPooling,
+            context.MySqlSslMode,
+            context.MySqlPooling,
+            context.MySqlAllowPublicKeyRetrieval,
             context.Timeouts.ConnectionTimeoutSeconds,
             context.Timeouts.CommandTimeoutSeconds);
     }
@@ -2253,14 +2565,29 @@ ORDER BY member.rolname;
                 server.SqlServerTrustMode);
         }
 
-        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+        if (IsPostgreSql(server.Provider))
+        {
+            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+                server.ServerName,
+                server.Port,
+                database,
+                username,
+                password,
+                server.PostgreSqlSslMode,
+                server.PostgreSqlPooling,
+                server.ConnectionTimeoutSeconds,
+                server.CommandTimeoutSeconds);
+        }
+
+        return ServerConnectionOptions.BuildMySqlUserConnectionString(
             server.ServerName,
             server.Port,
             database,
             username,
             password,
-            server.PostgreSqlSslMode,
-            server.PostgreSqlPooling,
+            server.MySqlSslMode,
+            server.MySqlPooling,
+            server.MySqlAllowPublicKeyRetrieval,
             server.ConnectionTimeoutSeconds,
             server.CommandTimeoutSeconds);
     }
@@ -2278,13 +2605,28 @@ ORDER BY member.rolname;
                 string.Empty);
         }
 
-        return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+        if (IsPostgreSql(provider))
+        {
+            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(
+                server,
+                port,
+                database,
+                username,
+                password,
+                string.Empty,
+                null,
+                null,
+                null);
+        }
+
+        return ServerConnectionOptions.BuildMySqlUserConnectionString(
             server,
             port,
             database,
             username,
             password,
             string.Empty,
+            null,
             null,
             null,
             null);
@@ -2296,17 +2638,32 @@ ORDER BY member.rolname;
     private static bool IsSqlServer(string provider)
         => SqlProviders.Normalize(provider) == SqlProviders.SqlServer;
 
+    private static bool IsPostgreSql(string provider)
+        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql;
+
     private static string QuoteSqlServerIdentifier(string name)
         => $"[{name.Replace("]", "]]", StringComparison.Ordinal)}]";
 
     private static string QuotePostgreSqlIdentifier(string name)
         => $"\"{name.Replace("\"", "\"\"", StringComparison.Ordinal)}\"";
 
+    private static string QuoteMySqlIdentifier(string name)
+        => $"`{name.Replace("`", "``", StringComparison.Ordinal)}`";
+
     private static string QuoteSqlLiteral(string value)
         => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
 
     private static string QuotePostgreSqlLiteral(string value)
         => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+    private static string QuoteMySqlLiteral(string value)
+        => $"'{value.Replace("'", "''", StringComparison.Ordinal)}'";
+
+    private static string QuoteMySqlAccount(string userName)
+        => $"{QuoteMySqlLiteral(userName)}@'%'";
+
+    private static string BuildMySqlDatabaseScope(string databaseName)
+        => $"{QuoteMySqlIdentifier(databaseName)}.*";
 
     private static string Require(string? value, string errorMessage)
         => string.IsNullOrWhiteSpace(value)
@@ -2341,6 +2698,11 @@ ORDER BY member.rolname;
         {
             LogHandledException("PostgreSQL operation failed", exception);
             return OperationResult.Failure($"PostgreSQL error: {exception.Message}");
+        }
+        catch (MySqlException exception)
+        {
+            LogHandledException("MySQL operation failed", exception);
+            return OperationResult.Failure($"MySQL error: {exception.Message}");
         }
         catch (IOException exception)
         {
@@ -2398,6 +2760,11 @@ ORDER BY member.rolname;
         {
             LogHandledException("PostgreSQL operation failed", exception);
             return OperationResult<T>.Failure($"PostgreSQL error: {exception.Message}");
+        }
+        catch (MySqlException exception)
+        {
+            LogHandledException("MySQL operation failed", exception);
+            return OperationResult<T>.Failure($"MySQL error: {exception.Message}");
         }
         catch (IOException exception)
         {

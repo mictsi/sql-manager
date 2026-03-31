@@ -106,6 +106,9 @@ internal sealed class ConfigStore
                 AdminPassword = serverNode["adminPassword"]?.GetValue<string>() ?? string.Empty,
                 PostgreSqlSslMode = serverNode["postgreSqlSslMode"]?.GetValue<string>() ?? string.Empty,
                 PostgreSqlPooling = serverNode["postgreSqlPooling"]?.GetValue<bool?>(),
+                MySqlSslMode = serverNode["mySqlSslMode"]?.GetValue<string>() ?? string.Empty,
+                MySqlPooling = serverNode["mySqlPooling"]?.GetValue<bool?>(),
+                MySqlAllowPublicKeyRetrieval = serverNode["mySqlAllowPublicKeyRetrieval"]?.GetValue<bool?>(),
                 SqlServerTrustMode = serverNode["sqlServerTrustMode"]?.GetValue<string>() ?? string.Empty,
                 ConnectionTimeoutSeconds = serverNode["connectionTimeoutSeconds"]?.GetValue<int?>(),
                 CommandTimeoutSeconds = serverNode["commandTimeoutSeconds"]?.GetValue<int?>(),
@@ -349,6 +352,7 @@ internal sealed class ConfigStore
             server.AdminUsername ??= string.Empty;
             server.AdminPassword ??= string.Empty;
             server.PostgreSqlSslMode = PostgreSqlSslModes.NormalizeConfigured(server.PostgreSqlSslMode);
+            server.MySqlSslMode = MySqlSslModes.NormalizeConfigured(server.MySqlSslMode);
             server.SqlServerTrustMode = SqlServerTrustModes.NormalizeConfigured(server.SqlServerTrustMode);
             if (server.ConnectionTimeoutSeconds is <= 0)
             {
@@ -476,11 +480,14 @@ internal sealed class ConfigStore
             $"Port: {(server.Port?.ToString() ?? "<default>")}",
             $"Admin Database: {server.AdminDatabase}",
             $"Admin User: {(string.IsNullOrWhiteSpace(server.AdminUsername) ? "<none>" : server.AdminUsername)}",
-            $"SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"PostgreSQL SSL Mode: {PostgreSqlSslModes.GetDisplayName(server.PostgreSqlSslMode)}",
+            $"MySQL SSL Mode: {MySqlSslModes.GetDisplayName(server.MySqlSslMode)}",
             $"SQL Server TLS Mode: {SqlServerTrustModes.GetDisplayName(server.SqlServerTrustMode)}",
             $"Connection Timeout: {ServerConnectionOptions.GetEffectiveConnectionTimeoutSeconds(server.ConnectionTimeoutSeconds)}",
             $"Command Timeout: {ServerConnectionOptions.GetEffectiveCommandTimeoutSeconds(server.CommandTimeoutSeconds)}",
-            $"Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
+            $"PostgreSQL Pooling: {ServerConnectionOptions.GetEffectivePostgreSqlPooling(server.PostgreSqlPooling)}",
+            $"MySQL Pooling: {ServerConnectionOptions.GetEffectiveMySqlPooling(server.MySqlPooling)}",
+            $"MySQL Allow Public Key Retrieval: {ServerConnectionOptions.GetEffectiveMySqlAllowPublicKeyRetrieval(server.MySqlAllowPublicKeyRetrieval)}",
             $"Password State: {(server.Encrypted ? "encrypted" : string.IsNullOrWhiteSpace(server.AdminPassword) ? "missing" : "saved")}",
             $"Tracked Databases: {server.Databases.Count}",
             $"Tracked Users: {server.Databases.Sum(database => database.Users.Count)}"

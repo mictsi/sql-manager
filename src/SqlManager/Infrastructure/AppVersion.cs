@@ -6,7 +6,7 @@ namespace SqlManager;
 internal static class AppVersion
 {
     private const string DefaultRepositoryUrl = "https://github.com/mictsi/sql-manager";
-    private const string DefaultDescription = "Manage SQL Server and PostgreSQL servers, databases, users, and configuration from a terminal UI or CLI.";
+    private const string DefaultDescription = "Manage SQL Server, PostgreSQL, and MySQL/MariaDB servers, databases, users, and configuration from a terminal UI or CLI.";
     private static readonly Assembly CurrentAssembly = Assembly.GetExecutingAssembly();
 
     public static string DisplayVersion { get; } = ResolveDisplayVersion();

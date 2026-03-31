@@ -50,6 +50,9 @@ internal sealed class CommandOptions
     public string? AdminPassword { get; set; }
     public string? PostgreSqlSslMode { get; set; }
     public bool? PostgreSqlPooling { get; set; }
+    public string? MySqlSslMode { get; set; }
+    public bool? MySqlPooling { get; set; }
+    public bool? MySqlAllowPublicKeyRetrieval { get; set; }
     public string? SqlServerTrustMode { get; set; }
     public int? ConnectionTimeoutSeconds { get; set; }
     public int? CommandTimeoutSeconds { get; set; }
@@ -135,6 +138,7 @@ internal static class CommandLineParser
             var connectionTimeout = ParseNullableInt(GetSingleOrDefault(optionMap, null, "connectiontimeout", "timeout"), "Connection timeout must be a positive integer.");
             var commandTimeout = ParseNullableInt(GetSingleOrDefault(optionMap, null, "commandtimeout"), "Command timeout must be a positive integer.");
             var pooling = ParseNullableBool(GetSingleOrDefault(optionMap, null, "pooling"), "Pooling must be true or false.");
+            var allowPublicKeyRetrieval = ParseNullableBool(GetSingleOrDefault(optionMap, null, "allowpublickeyretrieval", "allowpublickey"), "AllowPublicKeyRetrieval must be true or false.");
             var parsed = new ParsedArguments
             {
                 Command = command.Value,
@@ -152,6 +156,9 @@ internal static class CommandLineParser
                     AdminPassword = GetSingleOrDefault(optionMap, null, "adminpassword"),
                     PostgreSqlSslMode = GetSingleOrDefault(optionMap, null, "sslmode"),
                     PostgreSqlPooling = pooling,
+                    MySqlSslMode = GetSingleOrDefault(optionMap, null, "mysqlsslmode", "sslmode"),
+                    MySqlPooling = pooling,
+                    MySqlAllowPublicKeyRetrieval = allowPublicKeyRetrieval,
                     SqlServerTrustMode = GetSingleOrDefault(optionMap, null, "trustservercertificate", "trustmode"),
                     ConnectionTimeoutSeconds = connectionTimeout,
                     CommandTimeoutSeconds = commandTimeout,

@@ -131,6 +131,54 @@ public sealed class ConfigStoreTests
     }
 
     [Fact]
+    public async Task LoadAsync_NormalizesMySqlAliasAndDriverOptions()
+    {
+        var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-mysql-config-{Guid.NewGuid():N}.json");
+
+        try
+        {
+            var json = """
+            {
+              "selectedServerName": "mysql01",
+              "servers": [
+                {
+                  "serverName": "mysql01",
+                  "provider": "mariadb",
+                  "port": 3306,
+                  "adminDatabase": "mysql",
+                  "adminUsername": "root",
+                  "adminPassword": "secret",
+                  "mySqlSslMode": "verifyfull",
+                  "mySqlPooling": false,
+                  "mySqlAllowPublicKeyRetrieval": true,
+                  "databases": []
+                }
+              ]
+            }
+            """;
+
+            await File.WriteAllTextAsync(filePath, json);
+
+            var store = new ConfigStore();
+            var config = await store.LoadAsync(filePath, CancellationToken.None);
+
+            var server = Assert.Single(config.Servers);
+            Assert.Equal(SqlProviders.MySql, server.Provider);
+            Assert.Equal(3306, server.Port);
+            Assert.Equal(MySqlSslModes.VerifyFull, server.MySqlSslMode);
+            Assert.False(server.MySqlPooling);
+            Assert.True(server.MySqlAllowPublicKeyRetrieval);
+        }
+        finally
+        {
+            if (File.Exists(filePath))
+            {
+                File.Delete(filePath);
+            }
+        }
+    }
+
+    [Fact]
     public async Task SaveAsync_EncryptedEnvelopePersistsThemeName()
     {
         var filePath = Path.Combine(Path.GetTempPath(), $"sql-manager-theme-envelope-{Guid.NewGuid():N}.json");

@@ -286,6 +286,9 @@ public sealed class ConfigEncryptionTests
                 PostgreSqlSslModes.Prefer,
                 true,
                 null,
+                null,
+                null,
+                null,
                 15,
                 30,
                 null,
@@ -729,7 +732,7 @@ public sealed class ConfigEncryptionTests
     }
 
     private static SqlManagerService CreateService()
-        => new(new ConfigStore(), new ConfigPasswordProtector(), new PasswordGenerator(), new SqlServerGateway(), new PostgreSqlGateway());
+        => new(new ConfigStore(), new ConfigPasswordProtector(), new PasswordGenerator(), new SqlServerGateway(), new PostgreSqlGateway(), new MySqlGateway());
 
     private static async Task<ResolvedServerContext> InvokeResolveServerContextAsync(SqlManagerService service, CommandOptions options)
     {

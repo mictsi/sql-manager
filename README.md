@@ -1,13 +1,13 @@
 # SQL Manager
 
-`sql-manager` is a terminal-first SQL Server and PostgreSQL management tool built on .NET 10. It can run as a command-line utility or as a full-screen `Terminal.Gui` application.
+`sql-manager` is a terminal-first SQL Server, PostgreSQL, and MySQL/MariaDB management tool built on .NET 10. It can run as a command-line utility or as a full-screen `Terminal.Gui` application.
 
 ## Highlights
 
-- Manage multiple SQL Server and PostgreSQL connections from one `sql-config.json`
+- Manage multiple SQL Server, PostgreSQL, and MySQL/MariaDB connections from one `sql-config.json`
 - Create and remove databases, create users, update passwords, show users and databases, and manage roles
 - Use the CLI for scripting or the TUI for interactive day-to-day administration
-- Configure provider-aware connection settings per server: port, admin database, SQL Server trust mode, PostgreSQL SSL mode, PostgreSQL pooling, and per-server timeouts
+- Configure provider-aware connection settings per server: port, admin database, SQL Server trust mode, PostgreSQL SSL mode, MySQL SSL mode, pooling, MySQL public key retrieval, and per-server timeouts
 - Protect the config at rest with Argon2id-derived encryption and AES-256-GCM, with migration support for older encrypted config formats
 - Track selected connection, theme preference, version history, and deleted config entries in a built-in trash bin
 - Build and publish self-contained single-file binaries for Windows, macOS, Linux, and musl targets
@@ -30,7 +30,7 @@ When config encryption is disabled, stored admin and user passwords may be writt
 
 - .NET 10 SDK to build or run from source
 - PowerShell 7 to use `build.ps1` and `test.ps1`
-- Network access to the target SQL Server or PostgreSQL host
+- Network access to the target SQL Server, PostgreSQL, MySQL, or MariaDB host
 - No .NET installation on the target machine when using self-contained publish output
 
 ## Quick Start
@@ -59,7 +59,7 @@ After publishing, the Windows binary is `sql-manager.exe`. On Linux and macOS se
 
 The default config path is `sql-config.json` next to the executable.
 
-The app stores more metadata than older versions did. A typical config now looks like this:
+The app stores more metadata than older versions did. A shortened config example looks like this, and a fuller three-provider sample is available at `docs/sample-sql-config.json`:
 
 ```json
 {
@@ -147,9 +147,10 @@ Config notes:
 - Top-level `timeouts` provide defaults; per-server timeout values override them
 - New SQL Server connections default to port `1433`, admin database `master`, and trust mode `false`
 - New PostgreSQL connections default to port `5432`, admin database `postgres`, SSL mode `prefer`, and pooling `true`
+- New MySQL/MariaDB connections default to port `3306`, admin database `mysql`, SSL mode `required`, pooling `true`, and `allowPublicKeyRetrieval` `false`
 - `versionHistory` metadata is generated for servers, databases, users, and trash entries even though it is omitted from the example above for brevity
 - The TUI trash bin stores deleted server, database, and user config entries so they can be restored later
-- Generic roles in config are provider-aware at execution time: SQL Server supports `db_owner`, `db_datareader`, and `db_datawriter`; PostgreSQL supports `db_owner` only
+- Generic roles in config are provider-aware at execution time: SQL Server supports `db_owner`, `db_datareader`, and `db_datawriter`; PostgreSQL and MySQL/MariaDB support `db_owner` only
 
 ## CLI Commands
 
@@ -195,6 +196,18 @@ Add a PostgreSQL connection:
 
 ```powershell
 .\sql-manager.exe add-server --display-name "Primary Postgres" --server-name pg01.contoso.local --provider postgresql --port 5432 --admin-database postgres --admin-username postgres --admin-password "Secret123!" --ssl-mode require --pooling true
+```
+
+Add an Azure MySQL Flexible Server connection:
+
+```powershell
+.\sql-manager.exe add-server --display-name "Azure MySQL" --server-name mysql-flex-prod.mysql.database.azure.com --provider mysql --port 3306 --admin-database mysql --admin-username sqlmanager --admin-password "Secret123!" --mysql-ssl-mode required --pooling true --allow-public-key-retrieval false
+```
+
+Add a local MariaDB connection:
+
+```powershell
+.\sql-manager.exe add-server --display-name "Local MariaDB" --server-name localhost --provider mariadb --port 3306 --admin-database mysql --admin-username root --admin-password "Secret123!" --mysql-ssl-mode preferred --pooling true --allow-public-key-retrieval true
 ```
 
 Select the active connection by identifier:
@@ -250,6 +263,14 @@ Disable config encryption:
 ```powershell
 .\sql-manager.exe disable-config-encryption --config-path .\sql-config.json --encryption-password "ComplexPass!123"
 ```
+
+## MySQL / MariaDB Notes
+
+- Azure Database for MySQL Flexible Server: use the server FQDN, port `3306`, the admin login shown in Azure, and keep TLS on with `--mysql-ssl-mode required` or `verifyfull`. Leave `--allow-public-key-retrieval false`.
+- Local MySQL or MariaDB: use the local host or VM host name, keep `--mysql-ssl-mode preferred` when the server negotiates TLS, or switch to `disabled` only if the server is intentionally running without TLS. `--allow-public-key-retrieval true` can be needed for local MySQL 8 password auth without TLS.
+- SQL Manager manages MySQL/MariaDB accounts as `'username'@'%'` so the generated login can connect from Azure clients and local tools unless you later tighten the host part manually.
+- The MySQL/MariaDB `db_owner` mapping is `GRANT ALL PRIVILEGES ON db.* TO 'username'@'%';`. That is the closest equivalent to the SQL Server-style full-database owner role this tool manages.
+- To create users and grant that access, the admin account you configure for MySQL/MariaDB needs privileges to run `CREATE USER`, `ALTER USER`, `DROP USER`, and `GRANT` on the target databases. Azure Flexible Server admin accounts have the needed rights for this workflow.
 
 ## TUI Overview
 
@@ -339,5 +360,5 @@ Release builds use the tag as the numeric version and append the short commit SH
 
 - The app defaults to TUI mode when started without arguments and switches to CLI mode when arguments are supplied
 - SQL Server role aliases accepted by the CLI include `dbowner`, `db_owner`, `dbreader`, `db_reader`, `db_datareader`, `dbwriter`, `db_writer`, and `db_datawriter`
-- PostgreSQL currently supports `db_owner` only; reader and writer role aliases are rejected for PostgreSQL targets
+- PostgreSQL and MySQL/MariaDB currently support `db_owner` only; reader and writer role aliases are rejected for those targets
 - Existing encrypted configs from older versions remain readable and can be migrated to the full-file encrypted format

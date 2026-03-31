@@ -8,8 +8,8 @@ internal static class HelpContent
         "sql-manager --version",
         "sql-manager tui",
         "sql-manager view-config --config-path <path>",
-        "sql-manager init-config --config-path <path> --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]",
-        "sql-manager add-server --server-name <server> --provider sqlserver|postgresql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]",
+        "sql-manager init-config --config-path <path> --server-name <server> --provider sqlserver|postgresql|mysql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]",
+        "sql-manager add-server --server-name <server> --provider sqlserver|postgresql|mysql --admin-username <user> [--admin-password <password>] [--port <port>] [--admin-database <database>]",
         "sql-manager select-server --server-name <server>",
         "sql-manager sync-server --server-name <server> --admin-username <user> --admin-password <password>",
         "sql-manager show-databases --admin-password <password>",
@@ -31,7 +31,7 @@ internal static class HelpContent
     private static readonly string[] NoteLines =
     [
         "PowerShell-style compatibility is also supported: --action CreateUser or -Action CreateUser.",
-        "Roles vary by provider: SQL Server supports db_owner, db_datareader, db_datawriter; PostgreSQL supports db_owner only.",
+        "Roles vary by provider: SQL Server supports db_owner, db_datareader, db_datawriter; PostgreSQL and MySQL/MariaDB support db_owner only.",
         "Encrypted configs can be unlocked for CLI operations with --encryption-password <password>."
     ];
 

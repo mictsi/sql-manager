@@ -55,6 +55,23 @@ public sealed class SqlManagerServiceSyntaxTests
     }
 
     [Fact]
+    public void BuildConnectionString_UsesMySqlFormat()
+    {
+        var connectionString = InvokePrivateStatic<string>(
+            "BuildConnectionString",
+            SqlProviders.MySql,
+            "mysql01.contoso.local",
+            3306,
+            "appdb",
+            "app_user",
+            "Secret123!");
+
+        Assert.Equal(
+            "Server=mysql01.contoso.local;Database=appdb;User ID=app_user;Password=********;Ssl Mode=Required;Port=3306;Connection Timeout=15;Default Command Timeout=30;Pooling=true;Allow Public Key Retrieval=false;",
+            connectionString);
+    }
+
+    [Fact]
     public void BuildSqlServerUserConnectionString_UsesStrictEncryptionWhenRequested()
     {
         var connectionString = ServerConnectionOptions.BuildSqlServerUserConnectionString(
@@ -110,6 +127,66 @@ public sealed class SqlManagerServiceSyntaxTests
     }
 
     [Fact]
+    public void GetAdministrativeExecutionDatabase_UsesAdminDatabaseForMySql()
+    {
+        var context = new ResolvedServerContext(
+            new SqlManagerConfig(),
+            null,
+            "1",
+            "MySQL",
+            "mysql01.contoso.local",
+            SqlProviders.MySql,
+            3306,
+            "mysql",
+            "root",
+            "secret",
+            new SqlTimeoutConfig(),
+            PostgreSqlSslModes.Require,
+            true,
+            MySqlSslModes.Required,
+            true,
+            false,
+            SqlServerTrustModes.True);
+
+        var database = InvokePrivateStatic<string>(
+            "GetAdministrativeExecutionDatabase",
+            context,
+            "appdb");
+
+        Assert.Equal("mysql", database);
+    }
+
+    [Fact]
+    public void GetAdministrativeExecutionDatabase_UsesTargetDatabaseForSqlServer()
+    {
+        var context = new ResolvedServerContext(
+            new SqlManagerConfig(),
+            null,
+            "1",
+            "SQL",
+            "sql01.contoso.local",
+            SqlProviders.SqlServer,
+            1433,
+            "master",
+            "sa",
+            "secret",
+            new SqlTimeoutConfig(),
+            PostgreSqlSslModes.Require,
+            true,
+            MySqlSslModes.Required,
+            true,
+            false,
+            SqlServerTrustModes.True);
+
+        var database = InvokePrivateStatic<string>(
+            "GetAdministrativeExecutionDatabase",
+            context,
+            "LabDb");
+
+        Assert.Equal("LabDb", database);
+    }
+
+    [Fact]
     public void BuildSqlServerRoleMembershipSyncQuery_UsesAlterRoleSyntax()
     {
         var query = InvokePrivateStatic<string>(
@@ -140,6 +217,61 @@ public sealed class SqlManagerServiceSyntaxTests
         Assert.Contains($"GRANT \"{ownerRole}\" TO \"app_user\";", query);
         Assert.DoesNotContain("reader", query, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("writer", query, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void BuildMySqlRoleMembershipSyncQuery_UsesGrantAllPrivilegesSyntax()
+    {
+        var query = InvokePrivateStatic<string>(
+            "BuildMySqlRoleMembershipSyncQuery",
+            "appdb",
+            "app_user",
+            (IReadOnlyCollection<string>)new[] { "db_owner" });
+
+        Assert.Equal("GRANT ALL PRIVILEGES ON `appdb`.* TO 'app_user'@'%';", query);
+    }
+
+    [Fact]
+    public void BuildMySqlRoleMembershipSyncQuery_UsesRevokeAllPrivilegesSyntaxWhenNoRolesAreDesired()
+    {
+        var query = InvokePrivateStatic<string>(
+            "BuildMySqlRoleMembershipSyncQuery",
+            "appdb",
+            "app_user",
+            (IReadOnlyCollection<string>)Array.Empty<string>());
+
+        Assert.Equal("REVOKE ALL PRIVILEGES ON `appdb`.* FROM 'app_user'@'%';", query);
+    }
+
+    [Fact]
+    public void BuildRemoveDatabaseUserQuery_UsesMySqlRevokeSyntax()
+    {
+        var context = new ResolvedServerContext(
+            new SqlManagerConfig(),
+            null,
+            "1",
+            "MySQL",
+            "mysql01.contoso.local",
+            SqlProviders.MySql,
+            3306,
+            "mysql",
+            "root",
+            "secret",
+            new SqlTimeoutConfig(),
+            PostgreSqlSslModes.Require,
+            true,
+            MySqlSslModes.Required,
+            true,
+            false,
+            SqlServerTrustModes.True);
+
+        var query = InvokePrivateStatic<string>(
+            "BuildRemoveDatabaseUserQuery",
+            context,
+            "appdb",
+            "app_user");
+
+        Assert.Equal("REVOKE ALL PRIVILEGES ON `appdb`.* FROM 'app_user'@'%';", query);
     }
 
     [Fact]
@@ -177,7 +309,20 @@ public sealed class SqlManagerServiceSyntaxTests
                 SqlProviders.PostgreSql));
 
         Assert.IsType<UserInputException>(exception.InnerException);
-        Assert.Contains("PostgreSQL supports dbowner/db_owner only", exception.InnerException!.Message);
+        Assert.Contains("support dbowner/db_owner only", exception.InnerException!.Message);
+    }
+
+    [Fact]
+    public void NormalizeRoles_MySql_RejectsReaderAndWriterRoles()
+    {
+        var exception = Assert.Throws<TargetInvocationException>(() =>
+            InvokePrivateStatic<IReadOnlyList<string>>(
+                "NormalizeRoles",
+                (IReadOnlyList<string>)new[] { "db_datawriter" },
+                SqlProviders.MySql));
+
+        Assert.IsType<UserInputException>(exception.InnerException);
+        Assert.Contains("MySQL/MariaDB", exception.InnerException!.Message);
     }
 
     private static T InvokePrivateStatic<T>(string methodName, params object?[] arguments)

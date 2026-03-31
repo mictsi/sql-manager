@@ -490,7 +490,9 @@ internal sealed class SqlManagerApplication
                 }
                 case 4:
                 {
-                    var defaultAdminDatabase = options.Provider == SqlProviders.PostgreSql ? SqlProviders.GetDefaultAdminDatabase(options.Provider) : null;
+                    var defaultAdminDatabase = string.IsNullOrWhiteSpace(options.Provider)
+                        ? null
+                        : SqlProviders.GetDefaultAdminDatabase(options.Provider);
                     var response = _ui.PromptTextWithNavigation("Admin database (leave blank for provider default):", defaultAdminDatabase, true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
@@ -647,7 +649,8 @@ internal sealed class SqlManagerApplication
                 }
                 case 7:
                 {
-                    if (SqlProviders.Normalize(options.Provider) == SqlProviders.PostgreSql)
+                    var provider = SqlProviders.Normalize(options.Provider);
+                    if (provider == SqlProviders.PostgreSql)
                     {
                         var response = PromptPostgreSqlSslModeWithNavigation(options.PostgreSqlSslMode);
                                             if (HandlePromptNavigation(response, ref step, out var exitWizard))
@@ -661,6 +664,24 @@ internal sealed class SqlManagerApplication
                         }
 
                         options.PostgreSqlSslMode = response.Value;
+                        step++;
+                        continue;
+                    }
+
+                    if (provider == SqlProviders.MySql)
+                    {
+                        var response = PromptMySqlSslModeWithNavigation(options.MySqlSslMode);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                        {
+                            if (exitWizard)
+                            {
+                                return null;
+                            }
+
+                            continue;
+                        }
+
+                        options.MySqlSslMode = response.Value;
                         step++;
                         continue;
                     }
@@ -719,7 +740,14 @@ internal sealed class SqlManagerApplication
                 }
                 case 10:
                 {
-                    var response = _ui.PromptConfirmWithNavigation("Enable PostgreSQL pooling?", options.PostgreSqlPooling ?? true);
+                    var provider = SqlProviders.Normalize(options.Provider);
+                    var response = _ui.PromptConfirmWithNavigation(
+                        provider == SqlProviders.MySql
+                            ? "Enable MySQL / MariaDB pooling?"
+                            : "Enable PostgreSQL pooling?",
+                        provider == SqlProviders.MySql
+                            ? options.MySqlPooling ?? true
+                            : options.PostgreSqlPooling ?? true);
                                         if (HandlePromptNavigation(response, ref step, out var exitWizard))
                     {
                         if (exitWizard)
@@ -730,7 +758,32 @@ internal sealed class SqlManagerApplication
                         continue;
                     }
 
+                    if (provider == SqlProviders.MySql)
+                    {
+                        options.MySqlPooling = response.Value;
+                        step++;
+                        continue;
+                    }
+
                     options.PostgreSqlPooling = response.Value;
+                    return options;
+                }
+                case 11:
+                {
+                    var response = _ui.PromptConfirmWithNavigation(
+                        "Allow public key retrieval for local non-TLS auth?",
+                        options.MySqlAllowPublicKeyRetrieval ?? false);
+                                        if (HandlePromptNavigation(response, ref step, out var exitWizard))
+                    {
+                        if (exitWizard)
+                        {
+                            return null;
+                        }
+
+                        continue;
+                    }
+
+                    options.MySqlAllowPublicKeyRetrieval = response.Value;
                     return options;
                 }
                 default:
@@ -1420,9 +1473,9 @@ internal sealed class SqlManagerApplication
 
     private PromptResponse<IReadOnlyList<string>> PromptRolesWithNavigation(string provider)
     {
-        var prompt = SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
-            ? "Roles (comma separated, PostgreSQL supports db_owner only):"
-            : "Roles (comma separated):";
+        var prompt = SqlProviders.Normalize(provider) == SqlProviders.SqlServer
+            ? "Roles (comma separated):"
+            : "Roles (comma separated, PostgreSQL and MySQL / MariaDB support db_owner only):";
         var response = _ui.PromptTextWithNavigation(prompt, "db_owner", false);
         return response.Navigation switch
         {
@@ -1438,15 +1491,23 @@ internal sealed class SqlManagerApplication
     private PromptResponse<string> PromptProviderWithNavigation(string? currentProvider)
     {
         var preferredProvider = SqlProviders.Normalize(currentProvider);
-        var choices = preferredProvider == SqlProviders.PostgreSql
-            ? new[] { "PostgreSQL", "SQL Server" }
-            : new[] { "SQL Server", "PostgreSQL" };
+        var choices = preferredProvider switch
+        {
+            SqlProviders.PostgreSql => new[] { "PostgreSQL", "SQL Server", "MySQL / MariaDB" },
+            SqlProviders.MySql => new[] { "MySQL / MariaDB", "SQL Server", "PostgreSQL" },
+            _ => new[] { "SQL Server", "PostgreSQL", "MySQL / MariaDB" }
+        };
         var response = _ui.PromptSelectionWithNavigation("Provider", choices);
         return response.Navigation switch
         {
             PromptNavigation.Back => PromptResponse<string>.Back(),
             PromptNavigation.Cancel => PromptResponse<string>.Cancel(),
-            _ => PromptResponse<string>.Submitted(response.Value == "PostgreSQL" ? SqlProviders.PostgreSql : SqlProviders.SqlServer)
+            _ => PromptResponse<string>.Submitted(response.Value switch
+            {
+                "PostgreSQL" => SqlProviders.PostgreSql,
+                "MySQL / MariaDB" => SqlProviders.MySql,
+                _ => SqlProviders.SqlServer
+            })
         };
     }
 
@@ -1487,6 +1548,24 @@ internal sealed class SqlManagerApplication
             .Select(PostgreSqlSslModes.GetPickerDisplayName)
             .ToArray();
         var response = _ui.PromptSelectionWithNavigation("PostgreSQL SSL mode", choices);
+        return response.Navigation switch
+        {
+            PromptNavigation.Back => PromptResponse<string>.Back(),
+            PromptNavigation.Cancel => PromptResponse<string>.Cancel(),
+            _ => PromptResponse<string>.Submitted(orderedModes[Math.Max(0, Array.IndexOf(choices, response.Value))])
+        };
+    }
+
+    private PromptResponse<string> PromptMySqlSslModeWithNavigation(string? currentSslMode)
+    {
+        var preferredMode = MySqlSslModes.GetEffective(currentSslMode);
+        var orderedModes = new[] { preferredMode }
+            .Concat(MySqlSslModes.Choices.Where(mode => !mode.Equals(preferredMode, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var choices = orderedModes
+            .Select(MySqlSslModes.GetPickerDisplayName)
+            .ToArray();
+        var response = _ui.PromptSelectionWithNavigation("MySQL / MariaDB SSL mode", choices);
         return response.Navigation switch
         {
             PromptNavigation.Back => PromptResponse<string>.Back(),

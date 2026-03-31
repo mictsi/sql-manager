@@ -34,7 +34,8 @@ internal static class Program
                 new ConfigPasswordProtector(),
                 new PasswordGenerator(),
                 new SqlServerGateway(),
-                new PostgreSqlGateway()));
+                new PostgreSqlGateway(),
+                new MySqlGateway()));
 
         try
         {

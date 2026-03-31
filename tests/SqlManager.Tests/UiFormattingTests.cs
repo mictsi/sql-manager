@@ -131,6 +131,16 @@ public sealed class UiFormattingTests
     }
 
     [Fact]
+    public void BuildServerEditorLabels_ReflectMySqlDefaults()
+    {
+        Assert.Equal("Host:", TerminalGuiRunner.BuildServerEditorServerLabel(SqlProviders.MySql));
+        Assert.Equal("Port (default 3306):", TerminalGuiRunner.BuildServerEditorPortLabel(SqlProviders.MySql));
+        Assert.Equal("Admin Database (default mysql):", TerminalGuiRunner.BuildServerEditorAdminDatabaseLabel(SqlProviders.MySql));
+        Assert.Equal("Admin User:", TerminalGuiRunner.BuildServerEditorAdminUserLabel(SqlProviders.MySql));
+        Assert.Contains("public key retrieval", TerminalGuiRunner.BuildServerEditorProviderHint(SqlProviders.MySql), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void BuildAboutSummaryText_IncludesCreditsAndBuildLabel()
     {
         var aboutText = InvokePrivateStatic<string>(
@@ -144,6 +154,7 @@ public sealed class UiFormattingTests
         Assert.Contains("Spectre.Console", aboutText);
         Assert.Contains("Microsoft.Data.SqlClient", aboutText);
         Assert.Contains("Npgsql", aboutText);
+        Assert.Contains("MySqlConnector", aboutText);
     }
 
     [Fact]
@@ -166,6 +177,33 @@ public sealed class UiFormattingTests
 
         Assert.Equal(
             "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=securejournal;User ID=securejournal;Password=;Encrypt=False;TrustServerCertificate=False;",
+            preview);
+    }
+
+    [Fact]
+    public void BuildConnectionStringPreview_UsesMySqlFormat()
+    {
+        var server = new ServerConfig
+        {
+            ServerName = "mysql01.contoso.local",
+            Provider = SqlProviders.MySql,
+            Port = 3306,
+            MySqlSslMode = MySqlSslModes.VerifyFull,
+            MySqlPooling = false,
+            MySqlAllowPublicKeyRetrieval = true,
+            ConnectionTimeoutSeconds = 20,
+            CommandTimeoutSeconds = 45
+        };
+
+        var preview = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildConnectionStringPreview",
+            server,
+            "appdb",
+            "app_user");
+
+        Assert.Equal(
+            "Server=mysql01.contoso.local;Database=appdb;User ID=app_user;Password=<PASSWORD_REQUIRED>;Ssl Mode=VerifyFull;Port=3306;Connection Timeout=20;Default Command Timeout=45;Pooling=false;Allow Public Key Retrieval=true;",
             preview);
     }
 

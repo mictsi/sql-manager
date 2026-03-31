@@ -39,6 +39,34 @@ public sealed class CommandLineParserTests
     }
 
     [Fact]
+    public void Parse_ReadsMySqlSpecificDriverOptions()
+    {
+        var result = CommandLineParser.Parse(
+            [
+                "add-server",
+                "--server-name", "mysql01.contoso.local",
+                "--provider", "mariadb",
+                "--port", "3306",
+                "--admin-database", "mysql",
+                "--admin-username", "dbadmin",
+                "--mysql-ssl-mode", "verifyfull",
+                "--pooling", "false",
+                "--allow-public-key-retrieval", "true"
+            ],
+            "sql-config.json");
+
+        Assert.True(result.Succeeded);
+        Assert.NotNull(result.Value);
+        Assert.Equal(SqlProviders.MySql, result.Value!.Options.Provider);
+        Assert.Equal(3306, result.Value.Options.Port);
+        Assert.Equal("mysql", result.Value.Options.AdminDatabase);
+        Assert.Equal("dbadmin", result.Value.Options.AdminUsername);
+        Assert.Equal(MySqlSslModes.VerifyFull, result.Value.Options.MySqlSslMode);
+        Assert.False(result.Value.Options.MySqlPooling);
+        Assert.True(result.Value.Options.MySqlAllowPublicKeyRetrieval);
+    }
+
+    [Fact]
     public void Parse_FailsForInvalidPort()
     {
         var result = CommandLineParser.Parse(

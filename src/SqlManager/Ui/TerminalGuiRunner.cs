@@ -13,6 +13,8 @@ namespace SqlManager;
 internal sealed class TerminalGuiRunner
 {
     private const string ManualEntryChoice = "<Enter manually>";
+    private const int DialogLabelX = 1;
+    private const int DialogFieldX = 14;
 
     private readonly SqlManagerService _service;
     private readonly PasswordGenerator _passwordGenerator = new();
@@ -1301,10 +1303,10 @@ internal sealed class TerminalGuiRunner
 
     private void ShowServerEditorDialog(ServerConfig? existingServer)
     {
-        const int serverEditorFieldX = 41;
+        var serverEditorFieldX = GetFormFieldX("Connection Identifier:");
         const int serverEditorFieldWidth = 55;
         const int serverEditorValueWidth = 28;
-        const int serverEditorChooserX = 73;
+        var serverEditorChooserX = serverEditorFieldX + serverEditorValueWidth + 2;
 
         var isEdit = existingServer is not null;
         var selectedProvider = SqlProviders.Normalize(existingServer?.Provider);
@@ -1325,57 +1327,82 @@ internal sealed class TerminalGuiRunner
         var commandTimeoutField = CreateTextField(
             existingServer?.CommandTimeoutSeconds?.ToString()
             ?? SqlTimeoutConfig.DefaultCommandTimeoutSeconds.ToString());
+        var selectedPostgreSqlSslMode = isEdit
+            ? PostgreSqlSslModes.GetEffective(existingServer?.PostgreSqlSslMode)
+            : PostgreSqlSslModes.GetDefaultForNewServers();
+        var selectedPostgreSqlPooling = isEdit
+            ? ServerConnectionOptions.GetEffectivePostgreSqlPooling(existingServer?.PostgreSqlPooling)
+            : true;
+        var selectedMySqlSslMode = isEdit
+            ? MySqlSslModes.GetEffective(existingServer?.MySqlSslMode)
+            : MySqlSslModes.GetDefaultForNewServers();
+        var selectedMySqlPooling = isEdit
+            ? ServerConnectionOptions.GetEffectiveMySqlPooling(existingServer?.MySqlPooling)
+            : true;
+        var selectedMySqlAllowPublicKeyRetrieval = isEdit
+            ? ServerConnectionOptions.GetEffectiveMySqlAllowPublicKeyRetrieval(existingServer?.MySqlAllowPublicKeyRetrieval)
+            : false;
+        var selectedSqlServerTrustMode = isEdit
+            ? SqlServerTrustModes.GetEffective(existingServer?.SqlServerTrustMode)
+            : SqlServerTrustModes.GetDefaultForNewServers();
         var poolingCheckBox = new CheckBox
         {
-            X = 24,
-            Y = 19,
+            X = DialogLabelX,
+            Y = 23,
+            Width = Dim.Fill(2),
             Text = "Enable connection pooling",
-            Value = ServerConnectionOptions.GetEffectivePostgreSqlPooling(existingServer?.PostgreSqlPooling)
+            Value = selectedProvider == SqlProviders.PostgreSql
+                ? (selectedPostgreSqlPooling ? CheckState.Checked : CheckState.UnChecked)
+                : selectedProvider == SqlProviders.MySql
+                    ? (selectedMySqlPooling ? CheckState.Checked : CheckState.UnChecked)
+                    : CheckState.UnChecked,
+            TabStop = TabBehavior.TabStop
+        };
+        var allowPublicKeyRetrievalCheckBox = new CheckBox
+        {
+            X = DialogLabelX,
+            Y = 25,
+            Width = Dim.Fill(2),
+            Text = "Allow public key retrieval for non-TLS local auth",
+            Value = selectedMySqlAllowPublicKeyRetrieval
                 ? CheckState.Checked
                 : CheckState.UnChecked,
             TabStop = TabBehavior.TabStop
         };
-        var selectedPostgreSqlSslMode = isEdit
-            ? PostgreSqlSslModes.GetEffective(existingServer?.PostgreSqlSslMode)
-            : PostgreSqlSslModes.GetDefaultForNewServers();
-        var selectedSqlServerTrustMode = isEdit
-            ? SqlServerTrustModes.GetEffective(existingServer?.SqlServerTrustMode)
-            : SqlServerTrustModes.GetDefaultForNewServers();
-
-        var identifierLabel = new Label { X = 1, Y = 1, Text = "Connection Identifier:" };
-        var displayNameLabel = new Label { X = 1, Y = 3, Text = "Display Name:" };
-        var serverLabel = new Label { X = 1, Y = 5 };
-        var providerLabel = new Label { X = 1, Y = 7, Text = "Server Type:" };
-        var providerValueLabel = new Label { X = 24, Y = 7, Width = 20 };
+        var identifierLabel = CreateFormLabel(1, "Connection Identifier:");
+        var displayNameLabel = CreateFormLabel(3, "Display Name:");
+        var serverLabel = CreateFormLabel(5);
+        var providerLabel = CreateFormLabel(7, "Server Type:");
+        var providerValueLabel = new Label { X = serverEditorFieldX, Y = 7, Width = serverEditorValueWidth };
         var changeProviderButton = new Button
         {
-            X = 46,
+            X = serverEditorChooserX,
             Y = 7,
             Width = 11,
             Text = "Choose",
             TabStop = TabBehavior.TabStop
         };
-        var portLabel = new Label { X = 1, Y = 9 };
-        var adminDatabaseLabel = new Label { X = 1, Y = 11 };
-        var adminUserLabel = new Label { X = 1, Y = 13 };
-        var securityModeLabel = new Label { X = 1, Y = 17 };
-        var securityModeValueLabel = new Label { X = 24, Y = 17, Width = 20 };
+        var portLabel = CreateFormLabel(9);
+        var adminDatabaseLabel = CreateFormLabel(11);
+        var adminUserLabel = CreateFormLabel(13);
+        var securityModeLabel = CreateFormLabel(17);
+        var securityModeValueLabel = new Label { X = serverEditorFieldX, Y = 17, Width = serverEditorValueWidth };
         var changeSecurityModeButton = new Button
         {
-            X = 46,
+            X = serverEditorChooserX,
             Y = 17,
             Width = 11,
             Text = "Choose",
             TabStop = TabBehavior.TabStop
         };
-        var connectionTimeoutLabel = new Label { X = 1, Y = 19 };
-        var commandTimeoutLabel = new Label { X = 1, Y = 21 };
+        var connectionTimeoutLabel = CreateFormLabel(19);
+        var commandTimeoutLabel = CreateFormLabel(21);
         var providerHintLabel = new Label
         {
-            X = 1,
-            Y = 25,
+            X = DialogLabelX,
+            Y = 27,
             Width = Dim.Fill(2),
-            Height = 2
+            Height = 3
         };
 
         var saveButton = new Button { Text = isEdit ? "Save" : "Add" };
@@ -1387,7 +1414,7 @@ internal sealed class TerminalGuiRunner
         {
             Title = isEdit ? $"Edit Server: {ServerConnections.GetSelectionDisplay(existingServer!)}" : "Add Server",
             Width = 104,
-            Height = 32,
+            Height = 34,
             TabStop = TabBehavior.TabGroup
         };
         ApplyTheme(dialog, TerminalThemeSurface.Dialog);
@@ -1426,9 +1453,12 @@ internal sealed class TerminalGuiRunner
         commandTimeoutField.X = serverEditorFieldX;
         commandTimeoutField.Width = serverEditorFieldWidth;
         commandTimeoutField.Y = 21;
-        poolingCheckBox.X = serverEditorFieldX;
+        poolingCheckBox.X = DialogLabelX;
         poolingCheckBox.Y = 23;
+        allowPublicKeyRetrievalCheckBox.X = DialogLabelX;
+        allowPublicKeyRetrievalCheckBox.Y = 25;
 
+        var adminPasswordLabel = CreateFormLabel(15, "Admin Password:");
         dialog.Add(
             identifierLabel,
             identifierField,
@@ -1445,6 +1475,8 @@ internal sealed class TerminalGuiRunner
             adminDatabaseField,
             adminUserLabel,
             adminUserField,
+            adminPasswordLabel,
+            adminPasswordField,
             securityModeLabel,
             securityModeValueLabel,
             changeSecurityModeButton,
@@ -1452,9 +1484,10 @@ internal sealed class TerminalGuiRunner
             connectionTimeoutField,
             commandTimeoutLabel,
             commandTimeoutField,
-            poolingCheckBox);
-        AddField(dialog, 15, "Admin Password:", adminPasswordField);
-        dialog.Add(providerHintLabel);
+            poolingCheckBox,
+            allowPublicKeyRetrievalCheckBox,
+            providerHintLabel);
+        NormalizeBodyTabOrder(dialog);
         dialog.Buttons = isEdit
             ? [saveButton, testConnectionButton, showPasswordButton, versionHistoryButton, backButton]
             : [saveButton, testConnectionButton, backButton];
@@ -1487,12 +1520,35 @@ internal sealed class TerminalGuiRunner
                 command.ConnectionTimeoutSeconds = ParseOptionalPositiveInteger(connectionTimeoutField, "Connection timeout must be a positive integer.");
                 command.CommandTimeoutSeconds = ParseOptionalPositiveInteger(commandTimeoutField, "Command timeout must be a positive integer.");
             }
+            else if (provider == SqlProviders.MySql)
+            {
+                command.MySqlSslMode = selectedMySqlSslMode;
+                command.MySqlPooling = poolingCheckBox.Value == CheckState.Checked;
+                command.MySqlAllowPublicKeyRetrieval = allowPublicKeyRetrievalCheckBox.Value == CheckState.Checked;
+                command.ConnectionTimeoutSeconds = ParseOptionalPositiveInteger(connectionTimeoutField, "Connection timeout must be a positive integer.");
+                command.CommandTimeoutSeconds = ParseOptionalPositiveInteger(commandTimeoutField, "Command timeout must be a positive integer.");
+            }
             else
             {
                 command.SqlServerTrustMode = selectedSqlServerTrustMode;
             }
 
             return command;
+        }
+
+        void CaptureProviderFieldValues()
+        {
+            if (selectedProvider == SqlProviders.PostgreSql)
+            {
+                selectedPostgreSqlPooling = poolingCheckBox.Value == CheckState.Checked;
+                return;
+            }
+
+            if (selectedProvider == SqlProviders.MySql)
+            {
+                selectedMySqlPooling = poolingCheckBox.Value == CheckState.Checked;
+                selectedMySqlAllowPublicKeyRetrieval = allowPublicKeyRetrievalCheckBox.Value == CheckState.Checked;
+            }
         }
 
         void RefreshProviderFields()
@@ -1502,20 +1558,34 @@ internal sealed class TerminalGuiRunner
             portLabel.Text = BuildServerEditorPortLabel(selectedProvider);
             adminDatabaseLabel.Text = BuildServerEditorAdminDatabaseLabel(selectedProvider);
             adminUserLabel.Text = BuildServerEditorAdminUserLabel(selectedProvider);
-            securityModeLabel.Text = selectedProvider == SqlProviders.PostgreSql
-                ? "SSL Mode:"
-                : "Encrypt / Trust Mode:";
+            securityModeLabel.Text = selectedProvider == SqlProviders.SqlServer
+                ? "Encrypt / Trust Mode:"
+                : "SSL Mode:";
             securityModeValueLabel.Text = selectedProvider == SqlProviders.PostgreSql
                 ? PostgreSqlSslModes.GetPickerDisplayName(selectedPostgreSqlSslMode)
-                : SqlServerTrustModes.GetPickerDisplayName(selectedSqlServerTrustMode);
-            var showPostgreSqlOptions = selectedProvider == SqlProviders.PostgreSql;
-            connectionTimeoutLabel.Text = "Timeout:";
+                : selectedProvider == SqlProviders.MySql
+                    ? MySqlSslModes.GetPickerDisplayName(selectedMySqlSslMode)
+                    : SqlServerTrustModes.GetPickerDisplayName(selectedSqlServerTrustMode);
+            var showAdvancedOptions = selectedProvider is SqlProviders.PostgreSql or SqlProviders.MySql;
+            connectionTimeoutLabel.Text = "Connection Timeout:";
             commandTimeoutLabel.Text = "Command Timeout:";
-            connectionTimeoutLabel.Visible = showPostgreSqlOptions;
-            connectionTimeoutField.Visible = showPostgreSqlOptions;
-            commandTimeoutLabel.Visible = showPostgreSqlOptions;
-            commandTimeoutField.Visible = showPostgreSqlOptions;
-            poolingCheckBox.Visible = showPostgreSqlOptions;
+            connectionTimeoutLabel.Visible = showAdvancedOptions;
+            connectionTimeoutField.Visible = showAdvancedOptions;
+            commandTimeoutLabel.Visible = showAdvancedOptions;
+            commandTimeoutField.Visible = showAdvancedOptions;
+            poolingCheckBox.Visible = showAdvancedOptions;
+            poolingCheckBox.Text = selectedProvider == SqlProviders.MySql
+                ? "Enable MySQL / MariaDB pooling"
+                : "Enable PostgreSQL pooling";
+            poolingCheckBox.Value = selectedProvider == SqlProviders.PostgreSql
+                ? (selectedPostgreSqlPooling ? CheckState.Checked : CheckState.UnChecked)
+                : selectedProvider == SqlProviders.MySql
+                    ? (selectedMySqlPooling ? CheckState.Checked : CheckState.UnChecked)
+                    : CheckState.UnChecked;
+            allowPublicKeyRetrievalCheckBox.Visible = selectedProvider == SqlProviders.MySql;
+            allowPublicKeyRetrievalCheckBox.Value = selectedMySqlAllowPublicKeyRetrieval
+                ? CheckState.Checked
+                : CheckState.UnChecked;
             providerHintLabel.Text = BuildServerEditorProviderHint(selectedProvider);
         }
 
@@ -1526,8 +1596,16 @@ internal sealed class TerminalGuiRunner
         {
             args.Handled = true;
 
-            var providerItems = new[] { "SQL Server", "PostgreSQL" };
-            var providerListView = CreateListView(providerItems, selectedProvider == SqlProviders.PostgreSql ? 1 : 0);
+            CaptureProviderFieldValues();
+
+            var providerItems = new[] { "SQL Server", "PostgreSQL", "MySQL / MariaDB" };
+            var providerListView = CreateListView(
+                providerItems,
+                selectedProvider == SqlProviders.PostgreSql
+                    ? 1
+                    : selectedProvider == SqlProviders.MySql
+                        ? 2
+                        : 0);
             var selection = ShowListDialog("Server Type", providerListView, "Select");
             if (selection != 0)
             {
@@ -1535,9 +1613,12 @@ internal sealed class TerminalGuiRunner
             }
 
             var previousProvider = selectedProvider;
-            selectedProvider = (providerListView.SelectedItem ?? 0) == 1
-                ? SqlProviders.PostgreSql
-                : SqlProviders.SqlServer;
+            selectedProvider = (providerListView.SelectedItem ?? 0) switch
+            {
+                1 => SqlProviders.PostgreSql,
+                2 => SqlProviders.MySql,
+                _ => SqlProviders.SqlServer
+            };
 
             if (!string.Equals(previousProvider, selectedProvider, StringComparison.OrdinalIgnoreCase))
             {
@@ -1568,6 +1649,20 @@ internal sealed class TerminalGuiRunner
                 }
 
                 selectedPostgreSqlSslMode = PostgreSqlSslModes.Choices[Math.Clamp(sslModeListView.SelectedItem ?? 0, 0, PostgreSqlSslModes.Choices.Count - 1)];
+            }
+            else if (selectedProvider == SqlProviders.MySql)
+            {
+                var items = MySqlSslModes.Choices
+                    .Select(MySqlSslModes.GetPickerDisplayName)
+                    .ToList();
+                var sslModeListView = CreateListView(items, Math.Max(0, MySqlSslModes.Choices.IndexOf(selectedMySqlSslMode)));
+                var selection = ShowListDialog("MySQL / MariaDB SSL Mode", sslModeListView, "Select");
+                if (selection != 0)
+                {
+                    return;
+                }
+
+                selectedMySqlSslMode = MySqlSslModes.Choices[Math.Clamp(sslModeListView.SelectedItem ?? 0, 0, MySqlSslModes.Choices.Count - 1)];
             }
             else
             {
@@ -1608,6 +1703,9 @@ internal sealed class TerminalGuiRunner
                             draft.AdminPassword,
                             draft.PostgreSqlSslMode,
                             draft.PostgreSqlPooling,
+                            draft.MySqlSslMode,
+                            draft.MySqlPooling,
+                            draft.MySqlAllowPublicKeyRetrieval,
                             draft.SqlServerTrustMode,
                             draft.ConnectionTimeoutSeconds,
                             draft.CommandTimeoutSeconds,
@@ -1632,6 +1730,9 @@ internal sealed class TerminalGuiRunner
                             AdminPassword = draft.AdminPassword,
                             PostgreSqlSslMode = draft.PostgreSqlSslMode,
                             PostgreSqlPooling = draft.PostgreSqlPooling,
+                            MySqlSslMode = draft.MySqlSslMode,
+                            MySqlPooling = draft.MySqlPooling,
+                            MySqlAllowPublicKeyRetrieval = draft.MySqlAllowPublicKeyRetrieval,
                             SqlServerTrustMode = draft.SqlServerTrustMode,
                             ConnectionTimeoutSeconds = draft.ConnectionTimeoutSeconds,
                             CommandTimeoutSeconds = draft.CommandTimeoutSeconds
@@ -1840,15 +1941,9 @@ internal sealed class TerminalGuiRunner
             "Remove",
             dialog =>
             {
-                dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
+                AddValueRow(dialog, 1, "Database:", databaseName);
                 var nextY = AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
-                dialog.Add(new Label
-                {
-                    X = 1,
-                    Y = nextY,
-                    Width = Dim.Fill(2),
-                    Text = "This drops the database from SQL Server and removes it from the config."
-                });
+                AddAlignedText(dialog, nextY, $"This drops the database from {SqlProviders.GetDisplayName(server.Provider)} and removes it from the config.");
             },
             () => ExecuteDatabaseSaveOperation(_service.RemoveDatabaseAsync(new CommandOptions
             {
@@ -1931,10 +2026,10 @@ internal sealed class TerminalGuiRunner
             "Show",
             dialog =>
             {
-                dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
+                AddValueRow(dialog, 1, "Database:", databaseName);
                 AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
             },
-            () => ExecuteUserLookup(_service.ShowUsersAsync(new CommandOptions
+            () => ExecuteUserLookup(server, _service.ShowUsersAsync(new CommandOptions
             {
                 Command = CommandKind.ShowUsers,
                 ConfigPath = _configPath,
@@ -1999,8 +2094,8 @@ internal sealed class TerminalGuiRunner
             "Test Login",
             dialog =>
             {
-                dialog.Add(new Label { X = 1, Y = 1, Text = $"Database: {databaseName}" });
-                dialog.Add(new Label { X = 1, Y = 3, Text = $"User: {userName}" });
+                AddValueRow(dialog, 1, "Database:", databaseName);
+                AddValueRow(dialog, 3, "User:", userName);
                 AddField(dialog, 5, "Password:", passwordField);
             },
             () => ExecuteDatabaseSaveOperation(
@@ -2065,16 +2160,15 @@ internal sealed class TerminalGuiRunner
             "Remove",
             dialog =>
             {
-                dialog.Add(new Label { X = 1, Y = 1, Text = $"User: {userName}" });
+                AddValueRow(dialog, 1, "User:", userName);
                 var nextY = AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
-                removeServerCheckBox.Y = nextY;
-                dialog.Add(removeServerCheckBox);
-                dialog.Add(new Label { X = 1, Y = nextY + 2, Text = "Remove database access from:" });
+                AddAlignedCheckBox(dialog, nextY, removeServerCheckBox);
+                AddAlignedText(dialog, nextY + 2, "Remove database access from:");
 
                 var databaseFrame = new FrameView
                 {
                     Title = "Databases",
-                    X = 1,
+                    X = DialogLabelX,
                     Y = nextY + 3,
                     Width = Dim.Fill(2),
                     Height = databaseViewportHeight + 2,
@@ -2161,7 +2255,7 @@ internal sealed class TerminalGuiRunner
             "Update",
             dialog =>
             {
-                dialog.Add(new Label { X = 1, Y = 1, Text = $"User: {userName}" });
+                AddValueRow(dialog, 1, "User:", userName);
                 var nextY = AddAdminCredentialSection(dialog, 3, server, adminUserField, adminPasswordField);
                 AddPasswordFieldWithGenerateButton(dialog, nextY, "New Password (optional):", newPasswordField, "Update Password");
             },
@@ -2206,7 +2300,7 @@ internal sealed class TerminalGuiRunner
                 var currentY = 1;
                 if (!string.IsNullOrWhiteSpace(fixedUserName))
                 {
-                    dialog.Add(new Label { X = 1, Y = currentY, Text = $"User: {fixedUserName}" });
+                    AddValueRow(dialog, currentY, "User:", fixedUserName);
                     currentY += 2;
                 }
                 else
@@ -2223,19 +2317,13 @@ internal sealed class TerminalGuiRunner
                     currentY += 3;
                 }
 
-                dialog.Add(new Label
-                {
-                    X = 1,
-                    Y = currentY,
-                    Width = Dim.Fill(2),
-                    Text = "Select roles per database. Leave all roles unchecked to remove database access."
-                });
+                AddAlignedText(dialog, currentY, "Select roles per database. Leave all roles unchecked to remove database access.");
                 currentY += 2;
 
                 var matrixFrame = new FrameView
                 {
                     Title = "Database Access",
-                    X = 1,
+                    X = DialogLabelX,
                     Y = currentY,
                     Width = Dim.Fill(2),
                     Height = matrixViewportHeight + 2,
@@ -2324,6 +2412,7 @@ internal sealed class TerminalGuiRunner
         };
         ApplyTheme(dialog, TerminalThemeSurface.Dialog);
         buildBody(dialog);
+        NormalizeBodyTabOrder(dialog);
         dialog.DefaultAcceptView = runButton;
         var initialFocus = FindPreferredInitialFocus(dialog);
         dialog.Buttons = [runButton, backButton];
@@ -2580,6 +2669,7 @@ internal sealed class TerminalGuiRunner
             "Spectre.Console: console rendering and formatting",
             "Microsoft.Data.SqlClient: SQL Server connectivity",
             "Npgsql: PostgreSQL connectivity",
+            "MySqlConnector: MySQL and MariaDB connectivity",
             "Konscious.Security.Cryptography.Argon2: password-based encryption support"
         ]);
 
@@ -2666,9 +2756,18 @@ internal sealed class TerminalGuiRunner
 
     private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
     {
-        return SqlProviders.Normalize(server.Provider) == SqlProviders.SqlServer
-            ? ServerConnectionOptions.BuildSqlServerUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.SqlServerTrustMode)
-            : ServerConnectionOptions.BuildPostgreSqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.PostgreSqlSslMode, server.PostgreSqlPooling, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
+        var provider = SqlProviders.Normalize(server.Provider);
+        if (provider == SqlProviders.SqlServer)
+        {
+            return ServerConnectionOptions.BuildSqlServerUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.SqlServerTrustMode);
+        }
+
+        if (provider == SqlProviders.PostgreSql)
+        {
+            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.PostgreSqlSslMode, server.PostgreSqlPooling, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
+        }
+
+        return ServerConnectionOptions.BuildMySqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.MySqlSslMode, server.MySqlPooling, server.MySqlAllowPublicKeyRetrieval, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
     }
 
     private void ShowDatabaseEntriesDialog(ServerConfig server, IReadOnlyList<string> databaseNames)
@@ -3012,9 +3111,12 @@ internal sealed class TerminalGuiRunner
         bool selectServerAfterSuccess = false)
         => ExecuteOperation(task, title, message, newActiveServer, selectServerAfterSuccess);
 
-    private OperationExecutionResult ExecuteUserLookup(Task<OperationResult<IReadOnlyList<DatabaseUserRow>>> task)
+    private OperationExecutionResult ExecuteUserLookup(ServerConfig server, Task<OperationResult<IReadOnlyList<DatabaseUserRow>>> task)
     {
-        var result = WaitForTaskCompletion(task, "Show Users", "Loading users from SQL Server. Press Ctrl+C to cancel.");
+        var result = WaitForTaskCompletion(
+            task,
+            "Show Users",
+            $"Loading users from {SqlProviders.GetDisplayName(server.Provider)}. Press Ctrl+C to cancel.");
         if (result.ExitCode == 130)
         {
             _exitCode = 130;
@@ -3352,7 +3454,7 @@ internal sealed class TerminalGuiRunner
     }
 
     internal static string BuildServerEditorServerLabel(string provider)
-        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
+        => SqlProviders.Normalize(provider) is SqlProviders.PostgreSql or SqlProviders.MySql
             ? "Host:"
             : "Server / Instance:";
 
@@ -3363,14 +3465,17 @@ internal sealed class TerminalGuiRunner
         => $"Admin Database (default {SqlProviders.GetDefaultAdminDatabase(provider)}):";
 
     internal static string BuildServerEditorAdminUserLabel(string provider)
-        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
-            ? "Admin User:"
-            : "Admin Login:";
+        => SqlProviders.Normalize(provider) == SqlProviders.SqlServer
+            ? "Admin Login:"
+            : "Admin User:";
 
     internal static string BuildServerEditorProviderHint(string provider)
-        => SqlProviders.Normalize(provider) == SqlProviders.PostgreSql
-            ? "PostgreSQL: use the host name, connect through the postgres admin database, and choose SSL mode, timeouts, and pooling settings for the connection."
-            : "SQL Server: use a host or instance name, connect through the master admin database, and choose whether the client uses Encrypt=False, Encrypt=True with TrustServerCertificate=True, or Encrypt=Strict.";
+        => SqlProviders.Normalize(provider) switch
+        {
+            SqlProviders.PostgreSql => "PostgreSQL: use the host name, connect through the postgres admin database, and choose SSL mode, timeouts, and pooling settings for the connection.",
+            SqlProviders.MySql => "MySQL / MariaDB: use the host name or Azure Flexible Server FQDN, connect through the mysql admin database, keep SSL Required or VerifyFull for Azure, and only enable public key retrieval for local non-TLS authentication.",
+            _ => "SQL Server: use a host or instance name, connect through the master admin database, and choose whether the client uses Encrypt=False, Encrypt=True with TrustServerCertificate=True, or Encrypt=Strict."
+        };
 
     private static string BuildPasswordState(string? password, bool encrypted)
     {
@@ -3398,39 +3503,105 @@ internal sealed class TerminalGuiRunner
     }
 
     private static TextField CreateTextField(string? value = null)
-        => new TextField
+    {
+        var field = new TextField
         {
             Text = value ?? string.Empty,
-            X = 24,
-            Width = 54,
+            X = DialogFieldX,
+            Width = Dim.Fill(2),
             TabStop = TabBehavior.TabStop
         };
+        ConfigureFormTextField(field);
+        return field;
+    }
 
     private static TextField CreateSecretField(string? value = null)
-        => new TextField
+    {
+        var field = new TextField
         {
             Text = value ?? string.Empty,
-            X = 24,
-            Width = 54,
+            X = DialogFieldX,
+            Width = Dim.Fill(2),
             Secret = true,
             TabStop = TabBehavior.TabStop
         };
+        ConfigureFormTextField(field);
+        return field;
+    }
+
+    private static void ConfigureFormTextField(TextField field)
+        => field.HasFocusChanged += (_, _) =>
+        {
+            if (!field.HasFocus)
+            {
+                return;
+            }
+
+            field.ClearAllSelection();
+            field.InsertionPoint = 0;
+        };
+
+    private static Label CreateFormLabel(int y, string? text = null)
+        => new()
+        {
+            X = DialogLabelX,
+            Y = y,
+            Text = text ?? string.Empty
+        };
+
+    private static int GetFormFieldX(string label)
+        => Math.Max(DialogFieldX, DialogLabelX + Math.Max(0, label.Length) + 1);
+
+    private static void AlignToFormFieldColumn(View view, int x, int y)
+    {
+        view.X = x;
+        view.Y = y;
+    }
+
+    private static void AddValueRow(Dialog dialog, int y, string label, string value)
+    {
+        var fieldX = GetFormFieldX(label);
+        dialog.Add(CreateFormLabel(y, label));
+        dialog.Add(new Label
+        {
+            X = fieldX,
+            Y = y,
+            Width = Dim.Fill(2),
+            Text = value
+        });
+    }
+
+    private static void AddAlignedText(Dialog dialog, int y, string text)
+        => dialog.Add(new Label
+        {
+            X = DialogLabelX,
+            Y = y,
+            Width = Dim.Fill(2),
+            Text = text
+        });
+
+    private static void AddAlignedCheckBox(Dialog dialog, int y, CheckBox checkBox)
+    {
+        checkBox.X = DialogLabelX;
+        checkBox.Y = y;
+        checkBox.Width = Dim.Fill(2);
+        dialog.Add(checkBox);
+    }
 
     private static void AddField(Dialog dialog, int y, string label, View field)
     {
-        dialog.Add(new Label { X = 1, Y = y, Text = label });
-        field.Y = y;
+        var fieldX = GetFormFieldX(label);
+        dialog.Add(CreateFormLabel(y, label));
+        AlignToFormFieldColumn(field, fieldX, y);
         dialog.Add(field);
     }
 
     private void AddPasswordFieldWithGenerateButton(Dialog dialog, int y, string label, TextField field, string title)
     {
         const int buttonWidth = 14;
-        var fieldX = Math.Max(24, label.Length + 4);
-
-        dialog.Add(new Label { X = 1, Y = y, Text = label });
-        field.X = fieldX;
-        field.Y = y;
+        var fieldX = GetFormFieldX(label);
+        dialog.Add(CreateFormLabel(y, label));
+        AlignToFormFieldColumn(field, fieldX, y);
         field.Width = Dim.Fill(buttonWidth + 5);
         dialog.Add(field);
 
@@ -3462,19 +3633,40 @@ internal sealed class TerminalGuiRunner
     {
         if (HasStoredAdminCredentials(server))
         {
-            dialog.Add(new Label
-            {
-                X = 1,
-                Y = y,
-                Width = Dim.Fill(2),
-                Text = $"Using admin credentials from config ({server.AdminUsername})."
-            });
+            AddAlignedText(dialog, y, $"Using admin credentials from config ({server.AdminUsername}).");
             return y + 2;
         }
 
         AddField(dialog, y, "Admin User:", adminUserField);
         AddField(dialog, y + 2, "Admin Password:", adminPasswordField);
         return y + 4;
+    }
+
+    private static void NormalizeBodyTabOrder(View root)
+    {
+        foreach (var child in root.SubViews.ToList())
+        {
+            NormalizeBodyTabOrder(child);
+        }
+
+        var ordered = root.SubViews
+            .Select((view, index) => new { View = view, Index = index })
+            .OrderBy(item => item.View.Frame.Y)
+            .ThenBy(item => item.Index)
+            .Select(item => item.View)
+            .ToList();
+
+        if (ordered.Count <= 1 || ordered.SequenceEqual(root.SubViews))
+        {
+            return;
+        }
+
+        foreach (var child in ordered)
+        {
+            root.Remove(child);
+        }
+
+        root.Add(ordered.ToArray());
     }
 
     private static View? FindPreferredInitialFocus(View root)

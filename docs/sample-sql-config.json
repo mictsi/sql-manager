@@ -1,5 +1,6 @@
 {
-  "selectedServerName": "sql01.contoso.local",
+  "selectedServerName": "3",
+  "themeName": "iTerm2 Tango Dark",
   "encryptPasswords": false,
   "encryptionKey": "",
   "timeouts": {
@@ -8,11 +9,17 @@
   },
   "servers": [
     {
+      "serverIdentifier": "1",
+      "displayName": "Primary SQL Server",
       "serverName": "sql01.contoso.local",
       "provider": "sqlserver",
+      "port": 1433,
       "adminDatabase": "master",
       "adminUsername": "sa",
       "adminPassword": "ServerAdminSecret123!",
+      "sqlServerTrustMode": "false",
+      "connectionTimeoutSeconds": 15,
+      "commandTimeoutSeconds": 30,
       "encrypted": false,
       "databases": [
         {
@@ -25,36 +32,75 @@
               "roles": [
                 "db_datareader"
               ],
-              "connectionString": "Server=sql01.contoso.local;Database=LabDB;User ID=lab_reader;Password=********;Encrypt=True;TrustServerCertificate=True;"
+              "connectionString": "Server=tcp:sql01.contoso.local,1433;Initial Catalog=LabDB;User ID=lab_reader;Password=********;Encrypt=False;TrustServerCertificate=False;"
             }
           ]
         }
       ]
     },
     {
+      "serverIdentifier": "2",
+      "displayName": "Primary PostgreSQL",
       "serverName": "pg01.contoso.local",
       "provider": "postgresql",
       "port": 5432,
       "adminDatabase": "postgres",
       "adminUsername": "postgres",
       "adminPassword": "PostgresAdminSecret123!",
+      "postgreSqlSslMode": "require",
+      "postgreSqlPooling": true,
+      "connectionTimeoutSeconds": 15,
+      "commandTimeoutSeconds": 30,
       "encrypted": false,
       "databases": [
         {
           "databaseName": "appdb",
           "users": [
             {
-              "username": "app_writer",
-              "password": "writer-password",
+              "username": "app_owner",
+              "password": "owner-password",
               "encrypted": false,
               "roles": [
-                "db_datawriter"
+                "db_owner"
               ],
-              "connectionString": "Host=pg01.contoso.local;Port=5432;Database=appdb;Username=app_writer;Password=********;Ssl Mode=Require;"
+              "connectionString": "Host=pg01.contoso.local;Database=appdb;Username=app_owner;Password=********;Ssl Mode=Require;Port=5432;Timeout=15;Command Timeout=30;Pooling=true;"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "serverIdentifier": "3",
+      "displayName": "Azure MySQL Flexible Server",
+      "serverName": "mysql-flex-prod.mysql.database.azure.com",
+      "provider": "mysql",
+      "port": 3306,
+      "adminDatabase": "mysql",
+      "adminUsername": "sqlmanager",
+      "adminPassword": "MySqlAdminSecret123!",
+      "mySqlSslMode": "required",
+      "mySqlPooling": true,
+      "mySqlAllowPublicKeyRetrieval": false,
+      "connectionTimeoutSeconds": 15,
+      "commandTimeoutSeconds": 30,
+      "encrypted": false,
+      "databases": [
+        {
+          "databaseName": "appdb",
+          "users": [
+            {
+              "username": "app_owner",
+              "password": "owner-password",
+              "encrypted": false,
+              "roles": [
+                "db_owner"
+              ],
+              "connectionString": "Server=mysql-flex-prod.mysql.database.azure.com;Database=appdb;User ID=app_owner;Password=********;Ssl Mode=Required;Port=3306;Connection Timeout=15;Default Command Timeout=30;Pooling=true;Allow Public Key Retrieval=false;"
             }
           ]
         }
       ]
     }
-  ]
+  ],
+  "trash": []
 }

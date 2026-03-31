@@ -7,6 +7,7 @@ internal static class SqlProviders
 {
     public const string SqlServer = "sqlserver";
     public const string PostgreSql = "postgresql";
+    public const string MySql = "mysql";
 
     public static string Normalize(string? value)
         => string.IsNullOrWhiteSpace(value)
@@ -15,17 +16,33 @@ internal static class SqlProviders
             {
                 "sqlserver" or "sql-server" or "mssql" => SqlServer,
                 "postgresql" or "postgres" or "pgsql" => PostgreSql,
-                _ => throw new UserInputException($"Unsupported provider '{value}'. Use sqlserver or postgresql.")
+                "mysql" or "my-sql" or "mariadb" or "maria-db" or "maria" => MySql,
+                _ => throw new UserInputException($"Unsupported provider '{value}'. Use sqlserver, postgresql, or mysql.")
             };
 
     public static string GetDisplayName(string provider)
-        => Normalize(provider) == PostgreSql ? "PostgreSQL" : "SQL Server";
+        => Normalize(provider) switch
+        {
+            PostgreSql => "PostgreSQL",
+            MySql => "MySQL / MariaDB",
+            _ => "SQL Server"
+        };
 
     public static int GetDefaultPort(string provider)
-        => Normalize(provider) == PostgreSql ? 5432 : 1433;
+        => Normalize(provider) switch
+        {
+            PostgreSql => 5432,
+            MySql => 3306,
+            _ => 1433
+        };
 
     public static string GetDefaultAdminDatabase(string provider)
-        => Normalize(provider) == PostgreSql ? "postgres" : "master";
+        => Normalize(provider) switch
+        {
+            PostgreSql => "postgres",
+            MySql => "mysql",
+            _ => "master"
+        };
 }
 
 internal sealed class SqlManagerConfig
@@ -63,6 +80,9 @@ internal sealed class ServerConfig
     public string AdminPassword { get; set; } = string.Empty;
     public string PostgreSqlSslMode { get; set; } = string.Empty;
     public bool? PostgreSqlPooling { get; set; }
+    public string MySqlSslMode { get; set; } = string.Empty;
+    public bool? MySqlPooling { get; set; }
+    public bool? MySqlAllowPublicKeyRetrieval { get; set; }
     public string SqlServerTrustMode { get; set; } = string.Empty;
     public int? ConnectionTimeoutSeconds { get; set; }
     public int? CommandTimeoutSeconds { get; set; }
@@ -129,6 +149,9 @@ internal sealed record ResolvedServerContext(
     SqlTimeoutConfig Timeouts,
     string PostgreSqlSslMode,
     bool PostgreSqlPooling,
+    string MySqlSslMode,
+    bool MySqlPooling,
+    bool MySqlAllowPublicKeyRetrieval,
     string SqlServerTrustMode);
 
 internal static class ServerConnections
