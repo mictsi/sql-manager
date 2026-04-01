@@ -220,7 +220,8 @@ internal sealed class TerminalGuiRunner
     private List<Button> AddMenuColumn(Window window, int columnIndex, string title, Pos x, int topY, Dim width, IReadOnlyList<(string Title, Action Action)> actions)
     {
         var headingText = title.ToUpperInvariant();
-        var headingUnderline = new string('=', Math.Max(headingText.Length + 6, 20));
+        var headingBorder = $"+{new string('-', headingText.Length + 2)}+";
+        var headingBody = $"| {headingText} |";
         var buttons = new List<Button>(actions.Count);
 
         window.Add(new Label
@@ -229,7 +230,7 @@ internal sealed class TerminalGuiRunner
             Y = topY,
             Width = width,
             TextAlignment = Alignment.Center,
-            Text = headingText
+            Text = headingBorder
         });
 
         window.Add(new Label
@@ -238,7 +239,16 @@ internal sealed class TerminalGuiRunner
             Y = topY + 1,
             Width = width,
             TextAlignment = Alignment.Center,
-            Text = headingUnderline
+            Text = headingBody
+        });
+
+        window.Add(new Label
+        {
+            X = x,
+            Y = topY + 2,
+            Width = width,
+            TextAlignment = Alignment.Center,
+            Text = headingBorder
         });
 
         View? previous = null;
@@ -248,7 +258,7 @@ internal sealed class TerminalGuiRunner
             var button = new Button
             {
                 X = x,
-                Y = previous is null ? topY + 3 : Pos.Bottom(previous) + 1,
+                Y = previous is null ? topY + 4 : Pos.Bottom(previous) + 1,
                 Width = width,
                 Text = actionTitle,
                 CanFocus = true,
