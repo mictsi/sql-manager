@@ -223,7 +223,6 @@ public sealed class UiFormattingTests
 
         Assert.Contains("Ctrl+S", text);
         Assert.Contains("Ctrl+Q", text);
-        Assert.Contains("Snake, Pong, and Tetris", text);
         Assert.Contains("Help: open version details", text);
     }
 

@@ -282,7 +282,6 @@ Current TUI areas include:
 - User management: create users, manage roles, show users, test user logins, remove users, and update passwords
 - Configuration menu: save, view config, initialize config, change theme, toggle password encryption, inspect the trash bin, and refresh from disk
 - Help and About views: version details, command reference, repository URL, and general navigation help
-- Built-in games: Snake, Pong, and Tetris
 
 ## Build and Test
 
@@ -349,12 +348,19 @@ The workflow:
 
 - runs on every pushed tag
 - requires the tag to be a numeric version like `1.0.0` or `1.0.0.1`
+- uses `actions/checkout@v5` and `actions/setup-dotnet@v5` so the release pipeline is aligned with the GitHub Actions Node.js 24 transition
 - runs `.\test.ps1 -Configuration Release`
 - publishes self-contained binaries for the full runtime matrix
 - zips each runtime folder into a release asset
 - creates or updates the GitHub release and uploads the generated archives
 
 Release builds use the tag as the numeric version and append the short commit SHA to the informational version. For example, tag `1.0.0` built from commit `abcdef1...` becomes informational version `1.0.0+abcdef1`.
+
+GitHub Actions note:
+
+- GitHub will force JavaScript actions to run on Node.js 24 by default on June 2, 2026, and remove Node.js 20 from hosted runners on September 16, 2026
+- this repository already uses the Node.js 24-ready major versions of the GitHub-maintained actions in `release.yml`
+- on self-hosted runners, `actions/setup-dotnet@v5` requires a runner version that supports Node.js 24, so keep the runner updated rather than relying on the temporary `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24` or `ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION` overrides
 
 ## Notes
 

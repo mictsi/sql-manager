@@ -68,7 +68,6 @@ internal static class HelpContent
             "Menus",
             "- File: save the current config with Ctrl+S or exit with Ctrl+Q.",
             "- Configuration: view config, initialize config, toggle password encryption, inspect trash, and refresh.",
-            "- Games: launch built-in terminal games such as Snake, Pong, and Tetris.",
             "- Help: open version details, this overview, or the full command reference.",
             "- About: review app metadata and copy the repository URL.",
             "",
