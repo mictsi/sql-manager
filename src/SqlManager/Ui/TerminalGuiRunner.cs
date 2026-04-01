@@ -27,7 +27,7 @@ internal sealed class TerminalGuiRunner
     private string? _activeServer;
     private Window? _mainWindow;
     private MenuBar? _mainMenuBar;
-    private Label? _activeServerLabel;
+    private Label? _activeServerValueLabel;
     private Button? _initialMainButton;
     private readonly List<IReadOnlyList<Button>> _mainMenuColumns = [];
     private readonly Dictionary<Button, (int ColumnIndex, int RowIndex)> _mainMenuButtonPositions = [];
@@ -122,20 +122,32 @@ internal sealed class TerminalGuiRunner
 
     private void BuildMainWindow(Window window)
     {
+        const int activeServerY = 2;
+        const int instructionsY = activeServerY + 2;
+        const int mainColumnsTopY = instructionsY + 2;
+
         var menuBar = BuildMenuBar();
         _mainMenuBar = menuBar;
-        _activeServerLabel = new Label
+        var activeServerPrefixLabel = new Label
         {
             X = 1,
-            Y = 1,
+            Y = activeServerY,
+            Text = "Active server:"
+        };
+
+        _activeServerValueLabel = new Label
+        {
+            X = Pos.Right(activeServerPrefixLabel) + 1,
+            Y = activeServerY,
             Width = Dim.Fill(1),
             Text = string.Empty
         };
+        ApplyTheme(_activeServerValueLabel, TerminalThemeSurface.ActiveStatus);
 
         var instructionsLabel = new Label
         {
             X = 1,
-            Y = 2,
+            Y = instructionsY,
             Width = Dim.Fill(1),
             Text = "Use Up/Down within a column, Left/Right across columns, Tab to cycle, and Enter to run the selected action."
         };
@@ -165,10 +177,10 @@ internal sealed class TerminalGuiRunner
             ("Update Password", (Action)ShowUpdatePasswordDialog)
         };
 
-        _mainMenuColumns.Add(AddMenuColumn(window, 0, "Server Management", 1, 4, Dim.Percent(50) - 2, serverActions));
-        _mainMenuColumns.Add(AddMenuColumn(window, 1, "User Management", Pos.Percent(50) + 1, 4, Dim.Fill(2), userActions));
+        _mainMenuColumns.Add(AddMenuColumn(window, 0, "Server Management", 1, mainColumnsTopY, Dim.Percent(50) - 2, serverActions));
+        _mainMenuColumns.Add(AddMenuColumn(window, 1, "User Management", Pos.Percent(50) + 1, mainColumnsTopY, Dim.Fill(2), userActions));
 
-        window.Add(menuBar, _activeServerLabel, instructionsLabel);
+        window.Add(menuBar, activeServerPrefixLabel, _activeServerValueLabel, instructionsLabel);
     }
 
     private MenuBar BuildMenuBar()
@@ -315,12 +327,12 @@ internal sealed class TerminalGuiRunner
 
     private void RefreshViews()
     {
-        if (_activeServerLabel is null)
+        if (_activeServerValueLabel is null)
         {
             return;
         }
 
-        _activeServerLabel.Text = $"Active server: {GetActiveServerLabel()}";
+        _activeServerValueLabel.Text = GetActiveServerLabel();
     }
 
     private void ReloadAndRefresh()
@@ -3313,6 +3325,12 @@ internal sealed class TerminalGuiRunner
         {
             ApplyTheme(_mainMenuBar, TerminalThemeSurface.Menu);
             _mainMenuBar.SetNeedsDraw();
+        }
+
+        if (_activeServerValueLabel is not null)
+        {
+            ApplyTheme(_activeServerValueLabel, TerminalThemeSurface.ActiveStatus);
+            _activeServerValueLabel.SetNeedsDraw();
         }
     }
 

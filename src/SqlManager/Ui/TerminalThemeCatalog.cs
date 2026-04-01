@@ -10,7 +10,8 @@ internal enum TerminalThemeSurface
     Runnable,
     Menu,
     Dialog,
-    Error
+    Error,
+    ActiveStatus
 }
 
 internal sealed record TerminalThemePalette
@@ -321,6 +322,7 @@ internal static class TerminalThemeCatalog
         schemes[TerminalThemeSurface.Menu] = CreateMenuScheme(palette);
         schemes[TerminalThemeSurface.Dialog] = CreateDialogScheme(palette);
         schemes[TerminalThemeSurface.Error] = CreateErrorScheme(palette);
+        schemes[TerminalThemeSurface.ActiveStatus] = CreateActiveStatusScheme(palette);
         return true;
     }
 
@@ -384,6 +386,24 @@ internal static class TerminalThemeCatalog
             Disabled = CreateAttribute(palette.BrightBlack, palette.Red)
         };
 
+    private static Scheme CreateActiveStatusScheme(TerminalThemePalette palette)
+        => new()
+        {
+            Normal = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            HotNormal = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            Focus = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            HotFocus = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            Active = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            HotActive = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            Highlight = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            Editable = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            ReadOnly = CreateAttribute(palette.BrightGreen, palette.Background, TextStyle.Bold),
+            Disabled = CreateAttribute(palette.Green, palette.Background, TextStyle.Bold)
+        };
+
     private static GuiAttribute CreateAttribute(string foreground, string background)
         => new(new GuiColor(foreground), new GuiColor(background));
+
+    private static GuiAttribute CreateAttribute(string foreground, string background, TextStyle style)
+        => new(new GuiColor(foreground), new GuiColor(background), style);
 }
