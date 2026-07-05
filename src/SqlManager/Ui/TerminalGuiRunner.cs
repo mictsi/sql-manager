@@ -2257,16 +2257,7 @@ internal sealed class TerminalGuiRunner
             .FirstOrDefault(database => database.DatabaseName.Equals(databaseName, StringComparison.OrdinalIgnoreCase))?
             .Users
             .FirstOrDefault(user => user.Username.Equals(row.UserName, StringComparison.OrdinalIgnoreCase));
-        var details = string.Join(Environment.NewLine,
-        [
-            $"Server: {server.ServerName}",
-            $"Database: {databaseName}",
-            $"User: {row.UserName}",
-            $"Login: {row.LoginName}",
-            $"Roles: {row.Roles}",
-            $"Password State: {BuildPasswordState(trackedUser?.Password, trackedUser?.Encrypted ?? false)}",
-            $"Connection String: {trackedUser?.ConnectionString ?? BuildConnectionStringPreview(server, databaseName, row.UserName)}"
-        ]);
+        var details = BuildUserEntryDetails(server, databaseName, row, trackedUser);
 
         var showPasswordButton = new Button { Text = "Show Password" };
         var versionHistoryButton = new Button { Text = "See Version History" };
@@ -2316,20 +2307,32 @@ internal sealed class TerminalGuiRunner
         dialog.Dispose();
     }
 
-    private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName)
+    private static string BuildUserEntryDetails(ServerConfig server, string databaseName, DatabaseUserRow row, UserConfig? trackedUser)
+        => string.Join(Environment.NewLine,
+        [
+            $"Server: {server.ServerName}",
+            $"Database: {databaseName}",
+            $"User: {row.UserName}",
+            $"Login: {row.LoginName}",
+            $"Roles: {row.Roles}",
+            $"Password State: {BuildPasswordState(trackedUser?.Password, trackedUser?.Encrypted ?? false)}",
+            $"Connection String: {BuildConnectionStringPreview(server, databaseName, row.UserName, trackedUser?.Password)}"
+        ]);
+
+    private static string BuildConnectionStringPreview(ServerConfig server, string databaseName, string userName, string? password)
     {
         var provider = SqlProviders.Normalize(server.Provider);
         if (provider == SqlProviders.SqlServer)
         {
-            return ServerConnectionOptions.BuildSqlServerUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.SqlServerTrustMode);
+            return ServerConnectionOptions.BuildSqlServerUserConnectionString(server.ServerName, server.Port, databaseName, userName, password, server.SqlServerTrustMode);
         }
 
         if (provider == SqlProviders.PostgreSql)
         {
-            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.PostgreSqlSslMode, server.PostgreSqlPooling, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
+            return ServerConnectionOptions.BuildPostgreSqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, password, server.PostgreSqlSslMode, server.PostgreSqlPooling, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
         }
 
-        return ServerConnectionOptions.BuildMySqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, null, server.MySqlSslMode, server.MySqlPooling, server.MySqlAllowPublicKeyRetrieval, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
+        return ServerConnectionOptions.BuildMySqlUserConnectionString(server.ServerName, server.Port, databaseName, userName, password, server.MySqlSslMode, server.MySqlPooling, server.MySqlAllowPublicKeyRetrieval, server.ConnectionTimeoutSeconds, server.CommandTimeoutSeconds);
     }
 
     private void ShowDatabaseEntriesDialog(ServerConfig server, IReadOnlyList<string> databaseNames)

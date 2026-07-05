@@ -173,13 +173,73 @@ public sealed class UiFormattingTests
             "BuildConnectionStringPreview",
             server,
             "securejournal",
-            "securejournal");
+            "securejournal",
+            null);
 
         Assert.Equal(
             "Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=securejournal;User ID=securejournal;Password=;Encrypt=False;TrustServerCertificate=False;",
             preview);
     }
 
+    [Fact]
+    public void BuildConnectionStringPreview_UsesPostgreSqlFormat()
+    {
+        var server = new ServerConfig
+        {
+            ServerName = "pg01.contoso.local",
+            Provider = SqlProviders.PostgreSql,
+            Port = 5432,
+            PostgreSqlSslMode = PostgreSqlSslModes.Prefer,
+            PostgreSqlPooling = true,
+            ConnectionTimeoutSeconds = 15,
+            CommandTimeoutSeconds = 30
+        };
+
+        var preview = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildConnectionStringPreview",
+            server,
+            "appdb",
+            "app_user",
+            null);
+
+        Assert.Equal(
+            "Host=pg01.contoso.local;Database=appdb;Username=app_user;Password=<PASSWORD_REQUIRED>;Ssl Mode=Prefer;Port=5432;Timeout=15;Command Timeout=30;Pooling=true;",
+            preview);
+    }
+
+    [Fact]
+    public void BuildUserEntryDetails_RecomputesSqlServerConnectionStringWhenStoredValueIsStale()
+    {
+        var server = new ServerConfig
+        {
+            ServerName = "azimondo.swedencentral.cloudapp.azure.com",
+            Provider = SqlProviders.SqlServer,
+            Port = 1433,
+            SqlServerTrustMode = SqlServerTrustModes.False
+        };
+        var row = new DatabaseUserRow("exchange-migration-toolkit-user", "exchange-migration-toolkit-user", "db_owner");
+        var trackedUser = new UserConfig
+        {
+            Username = "exchange-migration-toolkit-user",
+            Password = "Secret123!",
+            ConnectionString = "Host=azimondo.swedencentral.cloudapp.azure.com;Database=exchange-migration-toolkit;Username=exchange-migration-toolkit-user;Password=********;Ssl Mode=Prefer;Port=5432;Timeout=15;Command Timeout=30;Pooling=true;"
+        };
+
+        var details = InvokePrivateStatic<string>(
+            typeof(TerminalGuiRunner),
+            "BuildUserEntryDetails",
+            server,
+            "exchange-migration-toolkit",
+            row,
+            trackedUser);
+
+        Assert.Contains(
+            "Connection String: Server=tcp:azimondo.swedencentral.cloudapp.azure.com,1433;Initial Catalog=exchange-migration-toolkit;User ID=exchange-migration-toolkit-user;Password=********;Encrypt=False;TrustServerCertificate=False;",
+            details);
+        Assert.DoesNotContain("Host=azimondo.swedencentral.cloudapp.azure.com", details);
+        Assert.DoesNotContain("Port=5432", details);
+    }
     [Fact]
     public void BuildConnectionStringPreview_UsesMySqlFormat()
     {
@@ -200,7 +260,8 @@ public sealed class UiFormattingTests
             "BuildConnectionStringPreview",
             server,
             "appdb",
-            "app_user");
+            "app_user",
+            null);
 
         Assert.Equal(
             "Server=mysql01.contoso.local;Database=appdb;User ID=app_user;Password=<PASSWORD_REQUIRED>;Ssl Mode=VerifyFull;Port=3306;Connection Timeout=20;Default Command Timeout=45;Pooling=false;Allow Public Key Retrieval=true;",
