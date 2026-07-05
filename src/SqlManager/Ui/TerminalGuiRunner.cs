@@ -2183,16 +2183,17 @@ internal sealed class TerminalGuiRunner
         return new Size(width, height);
     }
 
-    private static TextView CreateSelectableReadOnlyTextView(string text, bool wordWrap = false)
-        => new()
+    private static View CreateSelectableReadOnlyTextView(string text, bool wordWrap = false)
+        => new Terminal.Gui.Editor.Editor
         {
             ReadOnly = true,
+            Multiline = true,
             WordWrap = wordWrap,
             Text = text,
             TabStop = TabBehavior.TabStop,
             CanFocus = true,
             MousePositionTracking = true,
-            SelectWordOnlyOnDoubleClick = false
+            ViewportSettings = ViewportSettingsFlags.HasScrollBars
         };
 
     private static void ConfigureSelectableReadOnlyField(TextField field)
